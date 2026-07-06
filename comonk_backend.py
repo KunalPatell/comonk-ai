@@ -241,9 +241,9 @@ def load_companies():
     for idx, row in enumerate(ws.iter_rows(min_row=4, values_only=True)):
         if not row[1]:
             continue
-        cols = (row + (None,) * 13)[:13]
-        _, name, cat, roles, e1, e2, e3, e4, e5, phone, website, linkedin, address = cols
-        emails = [str(e).strip() for e in (e1, e2, e3, e4, e5) if e]
+        cols = (row + (None,) * 17)[:17]
+        _, name, cat, roles, e1, e2, e3, e4, e5, phone, website, linkedin, address, city, priority, source, e6 = cols
+        emails = [str(e).strip() for e in (e1, e2, e3, e4, e5, e6) if e]
         COMPANIES.append({
             "id": idx, "name": str(name).strip(), "category": str(cat or "").strip(),
             "roles": str(roles or "").strip(), "emails": emails,
