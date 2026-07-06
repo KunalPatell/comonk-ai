@@ -43,7 +43,6 @@ new_num.txt
 .env.example
 COMONK_PLAN.md
 test_*.py
-questions.py
 db_setup.py
 main.py
 AIML_Companies_Apply_List.csv
