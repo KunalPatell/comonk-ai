@@ -12,7 +12,7 @@ COPY requirements_comonk.txt .
 RUN pip install --no-cache-dir -r requirements_comonk.txt
 
 # App code
-COPY comonk_backend.py comonk_agents.py comonk_rag.py ./
+COPY *.py ./
 COPY frontend/ ./frontend/
 COPY Ahmedabad_IT_AIML_FINAL_MASTER.xlsx .
 
