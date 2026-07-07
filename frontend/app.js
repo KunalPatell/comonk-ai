@@ -507,6 +507,12 @@ async function matchCompanies() {
     $('sb-targets-count').textContent = S.companies.length;
     $('kpi-matches').textContent = S.companies.length;
 
+    const companySelect = $('iv-company');
+    if (companySelect && S.companies && S.companies.length) {
+      companySelect.innerHTML = '<option value="-1">General Technical Interview</option>' + 
+        S.companies.map(c => `<option value="${c.id}">${escHtml(c.name)}</option>`).join('');
+    }
+
     // Score for sidebar match bar
     const aiCount = S.companies.filter(c => c.category?.includes('AI')).length;
     const pct = Math.min(100, Math.round((aiCount / Math.max(1, S.companies.length)) * 200));
