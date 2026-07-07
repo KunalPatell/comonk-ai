@@ -160,7 +160,9 @@ def _migrate():
         ("autopilot_runs", "id", "INTEGER PRIMARY KEY AUTOINCREMENT"),
         ("autopilot_drafts", "id", "INTEGER PRIMARY KEY AUTOINCREMENT"),
         ("learning_progress", "id", "INTEGER PRIMARY KEY AUTOINCREMENT"),
-        ("interview_sessions", "id", "INTEGER PRIMARY KEY AUTOINCREMENT")
+        ("interview_sessions", "id", "INTEGER PRIMARY KEY AUTOINCREMENT"),
+        ("companies", "city", "TEXT DEFAULT ''"),
+        ("contacts", "linkedin_url", "TEXT DEFAULT ''")
     ]
     with _db() as c:
         for table, col, decl in cols:
@@ -318,6 +320,7 @@ def load_companies():
             "roles": str(roles or "").strip(), "emails": emails,
             "phone": str(phone or "").strip(), "website": str(website or "").strip(),
             "linkedin": str(linkedin or "").strip(), "address": str(address or "").strip(),
+            "city": str(city or "").strip(),
         })
     wb.close()
     print(f"[DB] {len(COMPANIES)} companies loaded")
@@ -1222,23 +1225,30 @@ def api_referral_finder(company_id: int, request: Request):
     c_name = c["name"].lower()
 
     matched = None
-    # 1. Direct notes/linkedin match
-    for r in RECRUITERS:
-        if c_name in r["notes"].lower() or c_name in r["linkedin"].lower():
-            matched = r
-            break
-
-    # 2. Deterministic city fallback
-    if not matched:
-        city = c["address"].split(",")[-1].strip() if c["address"] else "Ahmedabad"
-        city_recs = [r for r in RECRUITERS if city.lower() in r["city"].lower()]
-        if not city_recs:
-            city_recs = [r for r in RECRUITERS if "ahmedabad" in r["city"].lower()]
-        if not city_recs:
-            city_recs = RECRUITERS
-
-        if city_recs:
-            matched = city_recs[company_id % len(city_recs)]
+    with _db() as cursor:
+        cursor.execute("SELECT name, phone, linkedin_url FROM contacts WHERE company_id = ? AND linkedin_url != ''", (company_id,))
+        rows = cursor.fetchall()
+        if rows:
+            matched = {
+                "name": rows[0][0],
+                "linkedin": rows[0][2],
+                "city": c.get("city") or "Ahmedabad",
+                "category": "HR Specialist",
+                "phone": rows[0][1],
+                "notes": "Linked LinkedIn Recruiter Profile"
+            }
+        else:
+            cursor.execute("SELECT name, phone, linkedin_url FROM contacts WHERE company_id = ?", (company_id,))
+            rows = cursor.fetchall()
+            if rows:
+                matched = {
+                    "name": rows[0][0],
+                    "linkedin": rows[0][2] or "https://www.linkedin.com/in/krunal-patel",
+                    "city": c.get("city") or "Ahmedabad",
+                    "category": "HR Recruiter",
+                    "phone": rows[0][1],
+                    "notes": "Linked Contact Profile"
+                }
 
     if not matched:
         matched = {

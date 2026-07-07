@@ -549,7 +549,7 @@ function renderCompanies() {
           <div class="co-cat">${escHtml(c.category || '')}</div>
         </div>
         ${c.fit_score ? `
-          <div class="co-score-badge ${fitScoreClass}" title="${escHtml(c.fit_score.reasons.join('\n'))}" style="cursor:help;display:flex;align-items:center;gap:3px">
+          <div class="co-score-badge ${fitScoreClass}" onclick="event.stopPropagation();openFitScoreModal(${c.id})" style="cursor:pointer;display:flex;align-items:center;gap:3px">
             <i class="fas fa-bullseye"></i> ${c.fit_score.score}%
           </div>
         ` : c.score ? `<div class="co-score-badge ${scoreClass}">★ ${c.score}</div>` : ''}
@@ -567,6 +567,81 @@ function renderCompanies() {
   $('targets-search').addEventListener('input', debounce(renderCompanies, 300));
   $('targets-cat').addEventListener('change', renderCompanies);
 }
+
+function openFitScoreModal(id) {
+  const c = S.companies.find(x => x.id === id);
+  if (!c || !c.fit_score) return;
+  const fs = c.fit_score;
+  const b = fs.breakdown;
+  
+  openModal(`Fit Score Analysis — ${c.name}`, `
+    <div style="display:flex;flex-direction:column;gap:18px">
+      <div style="display:flex;align-items:center;gap:16px;background:rgba(124,58,237,0.06);border:1px solid rgba(124,58,237,0.15);border-radius:12px;padding:16px">
+        <div style="position:relative;width:72px;height:72px;border-radius:50%;background:conic-gradient(var(--c-purple) ${fs.score * 3.6}deg, var(--bg-3) 0deg);display:flex;align-items:center;justify-content:center;box-shadow:0 0 15px rgba(124,58,237,0.2)">
+          <div style="position:absolute;width:60px;height:60px;border-radius:50%;background:var(--bg-2);display:flex;flex-direction:column;align-items:center;justify-content:center">
+            <span style="font-size:18px;font-weight:900;color:white">${fs.score}%</span>
+          </div>
+        </div>
+        <div>
+          <h4 style="font-weight:bold;font-size:14px;color:white">Match Quality</h4>
+          <p class="muted" style="font-size:12px;margin-top:2px">Calculated across 4 parameters based on your uploaded resume.</p>
+        </div>
+      </div>
+
+      <div style="display:flex;flex-direction:column;gap:12px">
+        <div>
+          <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px">
+            <span style="font-weight:600;color:var(--text-2)"><i class="fas fa-brain" style="width:16px;color:var(--c-purple-l)"></i> Semantic Alignment</span>
+            <span style="font-weight:bold;color:white">${Math.round(b.semantic * 2)}% / 50%</span>
+          </div>
+          <div style="height:6px;background:var(--bg-3);border-radius:3px;overflow:hidden">
+            <div style="height:100%;width:${(b.semantic/50)*100}%;background:var(--c-purple)"></div>
+          </div>
+        </div>
+
+        <div>
+          <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px">
+            <span style="font-weight:600;color:var(--text-2)"><i class="fas fa-tasks" style="width:16px;color:var(--c-blue-l)"></i> Skills Match</span>
+            <span style="font-weight:bold;color:white">${Math.round(b.skills * 10/3)}% / 30%</span>
+          </div>
+          <div style="height:6px;background:var(--bg-3);border-radius:3px;overflow:hidden">
+            <div style="height:100%;width:${(b.skills/30)*100}%;background:var(--c-blue)"></div>
+          </div>
+        </div>
+
+        <div>
+          <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px">
+            <span style="font-weight:600;color:var(--text-2)"><i class="fas fa-map-marker-alt" style="width:16px;color:var(--c-gold-l)"></i> Target Location Match</span>
+            <span style="font-weight:bold;color:white">${b.location * 10}% / 10%</span>
+          </div>
+          <div style="height:6px;background:var(--bg-3);border-radius:3px;overflow:hidden">
+            <div style="height:100%;width:${(b.location/10)*100}%;background:var(--c-gold)"></div>
+          </div>
+        </div>
+
+        <div>
+          <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px">
+            <span style="font-weight:600;color:var(--text-2)"><i class="fas fa-address-book" style="width:16px;color:var(--c-green-l)"></i> HR Contacts Available</span>
+            <span style="font-weight:bold;color:white">${b.contact * 10}% / 10%</span>
+          </div>
+          <div style="height:6px;background:var(--bg-3);border-radius:3px;overflow:hidden">
+            <div style="height:100%;width:${(b.contact/10)*100}%;background:var(--c-green)"></div>
+          </div>
+        </div>
+      </div>
+
+      <div style="padding-top:10px;border-top:1px solid var(--border)">
+        <h5 style="font-size:12px;font-weight:bold;color:white;margin-bottom:8px">Score Breakdown Details</h5>
+        <ul style="padding-left:16px;font-size:12px;color:var(--text-2);display:flex;flex-direction:column;gap:6px;list-style:disc">
+          ${fs.reasons.map(r => `<li>${escHtml(r)}</li>`).join('')}
+        </ul>
+      </div>
+    </div>
+  `, `
+    <button class="btn-primary" onclick="closeModal()">Got it</button>
+  `);
+}
+window.openFitScoreModal = openFitScoreModal;
 
 function openCompanyModal(id) {
   const c = S.companies.find(x => x.id === id);
