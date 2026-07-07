@@ -128,7 +128,7 @@ function openPanel(id) {
 
   if (id === 'livejobs' && S.allJobs.length === 0) loadJobs();
   if (id === 'learning') loadLearning(S.learnTab);
-  if (id === 'tracker') renderKanban();
+  if (id === 'tracker') loadKanban();
   if (id === 'roadmap') loadRoadmapShCards();
   if (id === 'trending') initTrendingPanel();
   if (id === 'stackoverflow') initSOPanel();
@@ -350,7 +350,7 @@ function initApp() {
   initChat();
 
   // Trackers
-  renderKanban();
+  loadKanban();
 
   // Live jobs
   loadJobs();
@@ -520,6 +520,7 @@ function renderCompanies() {
 
   grid.innerHTML = list.map(c => {
     const scoreClass = (c.score || 0) >= 3 ? 'co-score-high' : (c.score || 0) >= 1 ? 'co-score-med' : 'co-score-low';
+    const fitScoreClass = c.fit_score && c.fit_score.score >= 70 ? 'co-score-high' : c.fit_score && c.fit_score.score >= 45 ? 'co-score-med' : 'co-score-low';
     const letter = (c.name || '?')[0].toUpperCase();
     return `
     <div class="co-card" onclick="openCompanyModal(${c.id})">
@@ -529,7 +530,11 @@ function renderCompanies() {
           <div class="co-name">${escHtml(c.name)}</div>
           <div class="co-cat">${escHtml(c.category || '')}</div>
         </div>
-        ${c.score ? `<div class="co-score-badge ${scoreClass}">★ ${c.score}</div>` : ''}
+        ${c.fit_score ? `
+          <div class="co-score-badge ${fitScoreClass}" title="${escHtml(c.fit_score.reasons.join('\n'))}" style="cursor:help;display:flex;align-items:center;gap:3px">
+            <i class="fas fa-bullseye"></i> ${c.fit_score.score}%
+          </div>
+        ` : c.score ? `<div class="co-score-badge ${scoreClass}">★ ${c.score}</div>` : ''}
       </div>
       ${c.roles ? `<div class="co-roles"><i class="fas fa-briefcase" style="color:var(--c-purple-l);font-size:11px;margin-right:4px"></i>${escHtml(c.roles.slice(0,120))}</div>` : ''}
       ${c.address ? `<div class="co-addr"><i class="fas fa-map-marker-alt"></i>${escHtml(c.address.slice(0,80))}</div>` : ''}
@@ -556,6 +561,16 @@ function openCompanyModal(id) {
       ${c.emails?.length ? `<div class="prof-row"><span class="pr-lbl">Emails</span><span>${c.emails.map(e=>`<a href="mailto:${e}">${e}</a>`).join('<br>')}</span></div>` : ''}
       ${c.phone ? `<div class="prof-row"><span class="pr-lbl">Phone</span><span>${escHtml(c.phone)}</span></div>` : ''}
       ${c.website ? `<div class="prof-row"><span class="pr-lbl">Website</span><span><a href="${escHtml(c.website)}" target="_blank">${escHtml(c.website)}</a></span></div>` : ''}
+      ${c.fit_score ? `
+        <div style="margin-top:10px;padding:12px;background:rgba(124,58,237,0.06);border:1px solid rgba(124,58,237,0.15);border-radius:12px">
+          <h5 style="color:var(--c-purple-l);margin-bottom:6px;font-size:13px;font-weight:bold;display:flex;align-items:center;gap:6px">
+            <i class="fas fa-bullseye"></i> Fit Score Analysis: ${c.fit_score.score}%
+          </h5>
+          <ul style="padding-left:16px;font-size:12px;color:var(--text-2);display:flex;flex-direction:column;gap:4px;list-style:disc">
+            ${c.fit_score.reasons.map(r => `<li>${escHtml(r)}</li>`).join('')}
+          </ul>
+        </div>
+      ` : ''}
     </div>`,
     `<button class="btn-primary" onclick="draftEmail(${id});closeModal()"><i class="fas fa-envelope"></i> Draft Email</button>
      <button class="btn-ghost" onclick="quickAddApp(${id});closeModal()"><i class="fas fa-plus"></i> Track Application</button>`
@@ -592,20 +607,41 @@ function copyEmail() {
   navigator.clipboard.writeText(`Subject: ${subj}\n\n${body}`).then(() => toast('Email copied to clipboard!', 'success'));
 }
 
-function quickAddApp(cid) {
+async function quickAddApp(cid) {
   const c = S.companies.find(x => x.id === cid);
   if (!c) return;
   const exists = S.apps.find(a => a.company === c.name);
   if (exists) { toast(`${c.name} already in tracker`, 'warning'); return; }
-  S.apps.push({
-    id: Date.now(), company: c.name, role: c.roles?.split(',')[0]?.trim() || 'Software Engineer',
-    status: 'saved', date: new Date().toISOString().slice(0, 10), notes: '', email: c.emails?.[0] || ''
-  });
-  saveApps();
-  renderKanban();
-  $('kpi-applied').textContent = S.apps.length;
-  $('sb-tracker-count').textContent = S.apps.length;
-  toast(`${c.name} added to tracker`, 'success');
+
+  if (Auth.isLoggedIn()) {
+    try {
+      const res = await api('POST', '/api/applications', {
+        company_id: cid,
+        custom_company_name: "",
+        status: 'saved',
+        notes: '',
+        fit_score: c.fit_score ? c.fit_score.score : 0
+      });
+      if (res.success) {
+        toast(`${c.name} added to tracker`, 'success');
+        loadKanban();
+      } else {
+        toast(res.error || 'Failed to add to tracker', 'error');
+      }
+    } catch (e) {
+      toast('Connection error: ' + e.message, 'error');
+    }
+  } else {
+    S.apps.push({
+      id: Date.now(), company: c.name, role: c.roles?.split(',')[0]?.trim() || 'Software Engineer',
+      status: 'saved', date: new Date().toISOString().slice(0, 10), notes: '', email: c.emails?.[0] || ''
+    });
+    saveApps();
+    renderKanban();
+    $('kpi-applied').textContent = S.apps.length;
+    $('sb-tracker-count').textContent = S.apps.length;
+    toast(`${c.name} added to tracker`, 'success');
+  }
 }
 
 /* ── Chat ─────────────────────────────────────────────────────── */
@@ -716,13 +752,38 @@ function renderJobs() {
     </div>`).join('');
 }
 
-function saveJob(btn, title, company) {
-  S.apps.push({ id: Date.now(), company: company || 'Unknown', role: title || 'Role', status: 'saved', date: new Date().toISOString().slice(0,10), notes: '', email: '' });
-  saveApps();
-  renderKanban();
-  $('sb-tracker-count').textContent = S.apps.length;
-  btn.innerHTML = '<i class="fas fa-check"></i> Saved'; btn.style.color = 'var(--c-green)';
-  toast(`${title} saved to tracker`, 'success');
+async function saveJob(btn, title, company) {
+  if (Auth.isLoggedIn()) {
+    let company_id = -1;
+    const match = S.companies.find(c => c.name.toLowerCase() === (company || '').toLowerCase());
+    if (match) company_id = match.id;
+
+    try {
+      const res = await api('POST', '/api/applications', {
+        company_id: company_id,
+        custom_company_name: company_id === -1 ? (company || 'Unknown') : "",
+        status: 'saved',
+        notes: `Saved job: ${title}`,
+        fit_score: 0
+      });
+      if (res.success) {
+        btn.innerHTML = '<i class="fas fa-check"></i> Saved'; btn.style.color = 'var(--c-green)';
+        toast(`${title} saved to tracker`, 'success');
+        loadKanban();
+      } else {
+        toast(res.error || 'Failed to save job', 'error');
+      }
+    } catch (e) {
+      toast('Connection error: ' + e.message, 'error');
+    }
+  } else {
+    S.apps.push({ id: Date.now(), company: company || 'Unknown', role: title || 'Role', status: 'saved', date: new Date().toISOString().slice(0,10), notes: '', email: '' });
+    saveApps();
+    renderKanban();
+    $('sb-tracker-count').textContent = S.apps.length;
+    btn.innerHTML = '<i class="fas fa-check"></i> Saved'; btn.style.color = 'var(--c-green)';
+    toast(`${title} saved to tracker`, 'success');
+  }
 }
 
 /* ── Application Tracker ─────────────────────────────────────── */
@@ -767,13 +828,71 @@ function renderAppCard(a, status) {
   </div>`;
 }
 
-function moveApp(id, newStatus) {
-  const app = S.apps.find(a => a.id === id);
-  if (app) { app.status = newStatus; saveApps(); renderKanban(); toast(`Moved to ${newStatus}`, 'success'); }
+async function loadKanban() {
+  if (Auth.isLoggedIn()) {
+    try {
+      const res = await api('GET', '/api/applications/board');
+      if (res.success) {
+        const apps = [];
+        Object.keys(res.board).forEach(status => {
+          res.board[status].forEach(item => {
+            apps.push({
+              id: item.id,
+              company_id: item.company_id,
+              company: item.company_name,
+              role: item.company_roles ? item.company_roles.split(',')[0].trim() : 'Software Developer',
+              status: item.status,
+              date: item.applied_at ? new Date(item.applied_at * 1000).toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10),
+              notes: item.notes,
+              fit_score: item.fit_score
+            });
+          });
+        });
+        S.apps = apps;
+      }
+    } catch (e) {
+      console.error("Failed to load applications board: " + e.message);
+    }
+  }
+  renderKanban();
 }
-function deleteApp(id) {
-  S.apps = S.apps.filter(a => a.id !== id);
-  saveApps(); renderKanban();
+
+async function moveApp(id, newStatus) {
+  if (Auth.isLoggedIn()) {
+    try {
+      const res = await api('PATCH', `/api/applications/${id}`, { status: newStatus });
+      if (res.success) {
+        toast(`Moved to ${newStatus}`, 'success');
+        loadKanban();
+      } else {
+        toast(res.error || 'Failed to move application', 'error');
+      }
+    } catch (e) {
+      toast('Connection error: ' + e.message, 'error');
+    }
+  } else {
+    const app = S.apps.find(a => a.id === id);
+    if (app) { app.status = newStatus; saveApps(); renderKanban(); toast(`Moved to ${newStatus}`, 'success'); }
+  }
+}
+
+async function deleteApp(id) {
+  if (Auth.isLoggedIn()) {
+    try {
+      const res = await api('DELETE', `/api/applications/${id}`);
+      if (res.success) {
+        toast('Application deleted', 'success');
+        loadKanban();
+      } else {
+        toast(res.error || 'Failed to delete application', 'error');
+      }
+    } catch (e) {
+      toast('Connection error: ' + e.message, 'error');
+    }
+  } else {
+    S.apps = S.apps.filter(a => a.id !== id);
+    saveApps(); renderKanban();
+  }
 }
 
 function openAddApp() {
@@ -791,16 +910,44 @@ function openAddApp() {
      <button class="btn-ghost" onclick="closeModal()">Cancel</button>`
   );
 }
-function confirmAddApp() {
+
+async function confirmAddApp() {
   const company = $('na-company').value.trim();
   if (!company) { toast('Company name is required', 'error'); return; }
-  S.apps.push({
-    id: Date.now(), company, role: $('na-role').value.trim() || 'Unknown Role',
-    status: $('na-status').value, date: $('na-date').value,
-    notes: $('na-notes').value.trim(), email: '',
-  });
-  saveApps(); renderKanban(); closeModal();
-  toast(`${company} added to tracker`, 'success');
+  const role = $('na-role').value.trim() || 'Software Developer';
+  const status = $('na-status').value;
+  const notes = $('na-notes').value.trim();
+
+  if (Auth.isLoggedIn()) {
+    let company_id = -1;
+    const match = S.companies.find(c => c.name.toLowerCase() === company.toLowerCase());
+    if (match) company_id = match.id;
+
+    try {
+      const res = await api('POST', '/api/applications', {
+        company_id: company_id,
+        custom_company_name: company_id === -1 ? company : "",
+        status: status,
+        notes: notes,
+        fit_score: 0
+      });
+      if (res.success) {
+        toast(`${company} added to tracker`, 'success');
+        closeModal();
+        loadKanban();
+      } else {
+        toast(res.error || 'Failed to add application', 'error');
+      }
+    } catch (e) {
+      toast('Connection error: ' + e.message, 'error');
+    }
+  } else {
+    S.apps.push({
+      id: Date.now(), company, role, status, date: $('na-date').value, notes, email: ''
+    });
+    saveApps(); renderKanban(); closeModal();
+    toast(`${company} added to tracker`, 'success');
+  }
 }
 
 /* ── Mock Interview ──────────────────────────────────────────── */

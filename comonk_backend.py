@@ -91,12 +91,36 @@ def _init_db():
             created_at REAL DEFAULT (strftime('%s','now')),
             resolved_at REAL DEFAULT 0
         );
+        CREATE TABLE IF NOT EXISTS applications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            company_id INTEGER NOT NULL,
+            custom_company_name TEXT DEFAULT '',
+            status TEXT DEFAULT 'saved',
+            applied_at REAL DEFAULT 0,
+            last_action_at REAL DEFAULT 0,
+            next_followup_at REAL DEFAULT 0,
+            email_to TEXT DEFAULT '',
+            subject TEXT DEFAULT '',
+            notes TEXT DEFAULT '',
+            fit_score INTEGER DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS application_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            application_id INTEGER NOT NULL,
+            type TEXT NOT NULL,
+            detail TEXT DEFAULT '',
+            created_at REAL DEFAULT (strftime('%s','now'))
+        );
         """)
 _init_db()
 
 def _migrate():
     """Add columns to existing DBs (CREATE TABLE IF NOT EXISTS won't add them)."""
-    cols = [("users", "profile_json", "TEXT DEFAULT ''")]
+    cols = [
+        ("users", "profile_json", "TEXT DEFAULT ''"),
+        ("applications", "custom_company_name", "TEXT DEFAULT ''")
+    ]
     with _db() as c:
         for table, col, decl in cols:
             try:
@@ -356,6 +380,18 @@ def root():
 # ── Pydantic models ───────────────────────────────────────────────────────────
 class MatchRequest(BaseModel):
     skills: List[str]
+
+class ApplicationRequest(BaseModel):
+    company_id: int
+    custom_company_name: Optional[str] = ""
+    status: str = "saved"
+    notes: Optional[str] = ""
+    fit_score: Optional[int] = 0
+
+class ApplicationPatchRequest(BaseModel):
+    status: Optional[str] = None
+    notes: Optional[str] = None
+    next_followup_at: Optional[float] = None
 
 class ChatRequest(BaseModel):
     message: str
@@ -711,10 +747,85 @@ async def api_parse_resume(file: UploadFile = File(...)):
     }
 
 
+def calculate_fit_score(company: dict, resume_skills: list, user_city: str = "Ahmedabad") -> dict:
+    raw_score = company.get("score", 0)
+    if raw_score <= 10:
+        sem_contrib = min(50.0, raw_score * 10)
+    else:
+        sem_contrib = min(50.0, raw_score * 0.5)
+
+    reasons = []
+    company_roles = str(company.get("roles") or "").lower()
+    company_category = str(company.get("category") or "").lower()
+    comp_text = company_roles + " " + company_category
+
+    matched_skills = []
+    for s in resume_skills:
+        s_low = s.strip().lower()
+        if s_low and s_low in comp_text:
+            matched_skills.append(s)
+
+    n_resume = len(resume_skills)
+    if n_resume > 0:
+        skills_contrib = (len(matched_skills) / n_resume) * 30.0
+    else:
+        skills_contrib = 0.0
+
+    if matched_skills:
+        reasons.append(f"Matches {len(matched_skills)} profile skills: {', '.join(matched_skills[:3])}")
+    else:
+        reasons.append("No direct skill matches in company profile")
+
+    comp_city = str(company.get("city") or "").strip().lower()
+    comp_addr = str(company.get("address") or "").strip().lower()
+    user_city_low = str(user_city or "Ahmedabad").strip().lower()
+
+    if user_city_low in comp_city or user_city_low in comp_addr:
+        location_contrib = 10.0
+        reasons.append(f"Located in target city ({user_city.strip()})")
+    else:
+        location_contrib = 0.0
+        reasons.append(f"Office located in {company.get('city') or 'Ahmedabad/Gandhinagar'}")
+
+    has_email = len(company.get("emails", [])) > 0
+    has_phone = bool(company.get("phone"))
+    if has_email or has_phone:
+        contact_contrib = 10.0
+        reasons.append("Direct HR contact details available")
+    else:
+        contact_contrib = 0.0
+        reasons.append("No active contact information available")
+
+    total_score = round(sem_contrib + skills_contrib + location_contrib + contact_contrib)
+    total_score = max(0, min(100, total_score))
+
+    if sem_contrib >= 35:
+        reasons.insert(0, "Strong semantic match to company profile")
+    elif sem_contrib >= 20:
+        reasons.insert(0, "Moderate semantic match to company profile")
+
+    return {
+        "score": total_score,
+        "reasons": reasons,
+        "breakdown": {
+            "semantic": round(sem_contrib, 1),
+            "skills": round(skills_contrib, 1),
+            "location": round(location_contrib, 1),
+            "contact": round(contact_contrib, 1)
+        }
+    }
+
 @app.post("/api/match")
-def api_match(req: MatchRequest):
+def api_match(req: MatchRequest, request: Request):
     """Keyword match (fast). Also tries RAG semantic match if ChromaDB is ready."""
     skills = [s.lower() for s in req.skills]
+    user_city = "Ahmedabad"
+
+    auth_header = request.headers.get("Authorization")
+    if auth_header:
+        user = _auth(auth_header)
+        if user:
+            user_city = user.get("city") or "Ahmedabad"
 
     # Try semantic RAG first
     try:
@@ -722,6 +833,9 @@ def api_match(req: MatchRequest):
         query = " ".join(req.skills[:10])
         rag_results = search_companies(query, n=40)
         if rag_results:
+            for r in rag_results:
+                r["fit_score"] = calculate_fit_score(r, req.skills, user_city)
+            rag_results.sort(key=lambda x: -x["fit_score"]["score"])
             return {"matches": rag_results[:80], "total": len(rag_results), "method": "semantic_rag"}
     except Exception:
         pass
@@ -731,10 +845,273 @@ def api_match(req: MatchRequest):
     for c in COMPANIES:
         sc = score_company(c, skills)
         if sc > 0 or c["category"] in ("AI / ML", "Software Development"):
-            scored.append({**c, "score": sc})
-    scored.sort(key=lambda x: (0 if "AI" in x["category"] else 1, -x["score"], x["name"].lower()))
+            c_copy = dict(c)
+            c_copy["score"] = sc
+            c_copy["fit_score"] = calculate_fit_score(c_copy, req.skills, user_city)
+            scored.append(c_copy)
+    scored.sort(key=lambda x: -x["fit_score"]["score"])
     return {"matches": scored[:80], "total": len(scored), "method": "keyword"}
 
+
+@app.post("/api/applications")
+def add_application(req: ApplicationRequest, request: Request):
+    auth_header = request.headers.get("Authorization")
+    if not auth_header:
+        raise HTTPException(401, "Missing Authorization Header")
+    user = _auth(auth_header)
+    if not user:
+        raise HTTPException(401, "Invalid session")
+
+    if req.company_id != -1 and (req.company_id < 0 or req.company_id >= len(COMPANIES)):
+        raise HTTPException(400, "Invalid company ID")
+
+    c = COMPANIES[req.company_id] if req.company_id != -1 else None
+
+    now = time.time()
+    with _db() as conn:
+        cursor = conn.cursor()
+        
+        if req.company_id == -1:
+            existing = cursor.execute(
+                "SELECT id FROM applications WHERE user_id = ? AND company_id = -1 AND custom_company_name = ?",
+                (user["id"], req.custom_company_name)
+            ).fetchone()
+        else:
+            existing = cursor.execute(
+                "SELECT id FROM applications WHERE user_id = ? AND company_id = ?",
+                (user["id"], req.company_id)
+            ).fetchone()
+
+        if existing:
+            app_id = existing[0]
+            cursor.execute(
+                """UPDATE applications 
+                   SET status = ?, notes = ?, fit_score = ?, last_action_at = ? 
+                   WHERE id = ?""",
+                (req.status, req.notes, req.fit_score, now, app_id)
+            )
+            cursor.execute(
+                "INSERT INTO application_events (application_id, type, detail) VALUES (?, ?, ?)",
+                (app_id, "status_change", f"Status updated to: {req.status}")
+            )
+        else:
+            email_to = c["emails"][0] if (c and c["emails"]) else ""
+            cursor.execute(
+                """INSERT INTO applications 
+                   (user_id, company_id, custom_company_name, status, applied_at, last_action_at, email_to, notes, fit_score)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (user["id"], req.company_id, req.custom_company_name or "", req.status, now, now, email_to, req.notes or "", req.fit_score or 0)
+            )
+            app_id = cursor.lastrowid
+            cursor.execute(
+                "INSERT INTO application_events (application_id, type, detail) VALUES (?, ?, ?)",
+                (app_id, "created", f"Application tracked at stage: {req.status}")
+            )
+        conn.commit()
+
+    return {"success": True, "application_id": app_id}
+
+
+@app.get("/api/applications")
+def list_applications(request: Request, status: Optional[str] = None):
+    auth_header = request.headers.get("Authorization")
+    if not auth_header:
+        raise HTTPException(401, "Missing Authorization Header")
+    user = _auth(auth_header)
+    if not user:
+        raise HTTPException(401, "Invalid session")
+
+    with _db() as conn:
+        if status:
+            rows = conn.execute(
+                "SELECT * FROM applications WHERE user_id = ? AND status = ? ORDER BY last_action_at DESC",
+                (user["id"], status)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM applications WHERE user_id = ? ORDER BY last_action_at DESC",
+                (user["id"],)
+            ).fetchall()
+
+    out = []
+    for r in rows:
+        d = dict(r)
+        comp_id = d["company_id"]
+        if comp_id >= 0 and comp_id < len(COMPANIES):
+            comp = COMPANIES[comp_id]
+            d["company_name"] = comp.get("name", "Unknown")
+            d["company_website"] = comp.get("website", "")
+            d["company_category"] = comp.get("category", "")
+            d["company_roles"] = comp.get("roles", "")
+        else:
+            d["company_name"] = d.get("custom_company_name") or "Custom Company"
+            d["company_website"] = ""
+            d["company_category"] = ""
+            d["company_roles"] = ""
+        out.append(d)
+
+    return {"success": True, "applications": out}
+
+
+@app.patch("/api/applications/{app_id}")
+def update_application(app_id: int, req: ApplicationPatchRequest, request: Request):
+    auth_header = request.headers.get("Authorization")
+    if not auth_header:
+        raise HTTPException(401, "Missing Authorization Header")
+    user = _auth(auth_header)
+    if not user:
+        raise HTTPException(401, "Invalid session")
+
+    now = time.time()
+    with _db() as conn:
+        cursor = conn.cursor()
+        existing = cursor.execute(
+            "SELECT status, notes, next_followup_at FROM applications WHERE id = ? AND user_id = ?",
+            (app_id, user["id"])
+        ).fetchone()
+
+        if not existing:
+            raise HTTPException(404, "Application not found")
+
+        curr_status, curr_notes, curr_followup = existing
+
+        updates = []
+        params = []
+        events = []
+
+        if req.status is not None and req.status != curr_status:
+            updates.append("status = ?")
+            params.append(req.status)
+            events.append(("status_change", f"Status changed from '{curr_status}' to '{req.status}'"))
+
+        if req.notes is not None and req.notes != curr_notes:
+            updates.append("notes = ?")
+            params.append(req.notes)
+            events.append(("notes_update", "Notes updated"))
+
+        if req.next_followup_at is not None and req.next_followup_at != curr_followup:
+            updates.append("next_followup_at = ?")
+            params.append(req.next_followup_at)
+            events.append(("followup_scheduled", f"Follow-up date changed to timestamp: {req.next_followup_at}"))
+
+        if updates:
+            updates.append("last_action_at = ?")
+            params.append(now)
+
+            sql = f"UPDATE applications SET {', '.join(updates)} WHERE id = ? AND user_id = ?"
+            params.extend([app_id, user["id"]])
+            cursor.execute(sql, tuple(params))
+
+            for ev_type, ev_detail in events:
+                cursor.execute(
+                    "INSERT INTO application_events (application_id, type, detail) VALUES (?, ?, ?)",
+                    (app_id, ev_type, ev_detail)
+                )
+            conn.commit()
+
+    return {"success": True}
+
+
+@app.delete("/api/applications/{app_id}")
+def delete_application_endpoint(app_id: int, request: Request):
+    auth_header = request.headers.get("Authorization")
+    if not auth_header:
+        raise HTTPException(401, "Missing Authorization Header")
+    user = _auth(auth_header)
+    if not user:
+        raise HTTPException(401, "Invalid session")
+
+    with _db() as conn:
+        cursor = conn.cursor()
+        existing = cursor.execute("SELECT id FROM applications WHERE id = ? AND user_id = ?", (app_id, user["id"])).fetchone()
+        if not existing:
+            raise HTTPException(404, "Application not found")
+
+        cursor.execute("DELETE FROM applications WHERE id = ?", (app_id,))
+        cursor.execute("DELETE FROM application_events WHERE application_id = ?", (app_id,))
+        conn.commit()
+
+    return {"success": True}
+
+
+@app.get("/api/applications/board")
+def get_applications_board(request: Request):
+    auth_header = request.headers.get("Authorization")
+    if not auth_header:
+        raise HTTPException(401, "Missing Authorization Header")
+    user = _auth(auth_header)
+    if not user:
+        raise HTTPException(401, "Invalid session")
+
+    board = {
+        "saved": [],
+        "applied": [],
+        "replied": [],
+        "interview": [],
+        "offer": [],
+        "rejected": []
+    }
+
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM applications WHERE user_id = ? ORDER BY last_action_at DESC",
+            (user["id"],)
+        ).fetchall()
+
+    for r in rows:
+        d = dict(r)
+        comp_id = d["company_id"]
+        if comp_id >= 0 and comp_id < len(COMPANIES):
+            comp = COMPANIES[comp_id]
+            d["company_name"] = comp.get("name", "Unknown")
+            d["company_website"] = comp.get("website", "")
+            d["company_category"] = comp.get("category", "")
+            d["company_roles"] = comp.get("roles", "")
+        else:
+            d["company_name"] = d.get("custom_company_name") or "Custom Company"
+            d["company_website"] = ""
+            d["company_category"] = ""
+            d["company_roles"] = ""
+
+        status_key = d["status"]
+        if status_key in board:
+            board[status_key].append(d)
+
+    return {"success": True, "board": board}
+
+
+@app.get("/api/applications/followups")
+def get_due_followups(request: Request):
+    auth_header = request.headers.get("Authorization")
+    if not auth_header:
+        raise HTTPException(401, "Missing Authorization Header")
+    user = _auth(auth_header)
+    if not user:
+        raise HTTPException(401, "Invalid session")
+
+    now = time.time()
+    with _db() as conn:
+        rows = conn.execute(
+            """SELECT * FROM applications 
+               WHERE user_id = ? AND next_followup_at > 0 AND next_followup_at <= ? 
+               ORDER BY next_followup_at ASC""",
+            (user["id"], now + 86400)
+        ).fetchall()
+
+    out = []
+    for r in rows:
+        d = dict(r)
+        comp_id = d["company_id"]
+        if comp_id >= 0 and comp_id < len(COMPANIES):
+            comp = COMPANIES[comp_id]
+            d["company_name"] = comp.get("name", "Unknown")
+            d["company_website"] = comp.get("website", "")
+        else:
+            d["company_name"] = d.get("custom_company_name") or "Custom Company"
+            d["company_website"] = ""
+        out.append(d)
+
+    return {"success": True, "followups": out}
 
 @app.get("/api/companies/{company_id}")
 def api_company_detail(company_id: int):
@@ -750,13 +1127,45 @@ def api_company_detail(company_id: int):
 
 
 @app.post("/api/draft-email")
-def api_draft_email(req: DraftEmailRequest):
+def api_draft_email(req: DraftEmailRequest, request: Request):
     if req.company_id < 0 or req.company_id >= len(COMPANIES):
         raise HTTPException(404, "Company not found")
     c = COMPANIES[req.company_id]
     to_email = c["emails"][0] if c["emails"] else ""
     role = req.target_role or (c["roles"].split(",")[0].strip() if c["roles"] else "Software Engineer")
     skills_str = ", ".join(req.skills[:6]) if req.skills else "software development"
+
+    # Auto-log to tracker
+    auth_header = request.headers.get("Authorization")
+    if auth_header:
+        user = _auth(auth_header)
+        if user:
+            now = time.time()
+            with _db() as conn:
+                cursor = conn.cursor()
+                existing = cursor.execute(
+                    "SELECT id FROM applications WHERE user_id = ? AND company_id = ?",
+                    (user["id"], req.company_id)
+                ).fetchone()
+                if existing:
+                    app_id = existing[0]
+                    cursor.execute(
+                        "INSERT INTO application_events (application_id, type, detail) VALUES (?, 'draft', ?)",
+                        (app_id, f"Drafted email for {role}")
+                    )
+                else:
+                    cursor.execute(
+                        """INSERT INTO applications 
+                           (user_id, company_id, status, applied_at, last_action_at, email_to, notes, fit_score)
+                           VALUES (?, ?, 'saved', ?, ?, ?, ?, ?)""",
+                        (user["id"], req.company_id, now, now, to_email, f"Drafted email for {role}", 0)
+                    )
+                    app_id = cursor.lastrowid
+                    cursor.execute(
+                        "INSERT INTO application_events (application_id, type, detail) VALUES (?, 'draft', ?)",
+                        (app_id, f"Drafted email for {role}")
+                    )
+                conn.commit()
 
     if llm_enabled():
         prompt = (
@@ -2588,7 +2997,7 @@ class ResendReq(BaseModel):
     body: str = ""
 
 @app.post("/api/resend-email")
-async def api_resend_email(req: ResendReq):
+async def api_resend_email(req: ResendReq, request: Request):
     key = os.getenv("RESEND_API_KEY", "")
     if not key:
         return {"sent": False, "missing": True, "setup_url": "https://resend.com",
@@ -2598,8 +3007,55 @@ async def api_resend_email(req: ResendReq):
             headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
             json={"from": "Comonk AI <onboarding@resend.dev>", "to": [req.to],
                   "subject": req.subject, "text": req.body}, timeout=10)
+        
+        sent = (r.status_code == 200)
         data = r.json()
-        return {"sent": r.status_code == 200, "id": data.get("id"), "error": data.get("message")}
+
+        if sent:
+            # Auto-log to tracker
+            company_id = None
+            for idx, c in enumerate(COMPANIES):
+                if req.to in c.get("emails", []):
+                    company_id = idx
+                    break
+
+            auth_header = request.headers.get("Authorization")
+            if auth_header and company_id is not None:
+                user = _auth(auth_header)
+                if user:
+                    now = time.time()
+                    with _db() as conn:
+                        cursor = conn.cursor()
+                        existing = cursor.execute(
+                            "SELECT id FROM applications WHERE user_id = ? AND company_id = ?",
+                            (user["id"], company_id)
+                        ).fetchone()
+
+                        if existing:
+                            app_id = existing[0]
+                            cursor.execute(
+                                "UPDATE applications SET status = 'applied', last_action_at = ?, email_to = ?, subject = ? WHERE id = ?",
+                                (now, req.to, req.subject, app_id)
+                            )
+                            cursor.execute(
+                                "INSERT INTO application_events (application_id, type, detail) VALUES (?, 'sent', ?)",
+                                (app_id, f"Sent email: '{req.subject}' to {req.to}")
+                            )
+                        else:
+                            cursor.execute(
+                                """INSERT INTO applications 
+                                   (user_id, company_id, status, applied_at, last_action_at, email_to, subject)
+                                   VALUES (?, ?, 'applied', ?, ?, ?, ?)""",
+                                (user["id"], company_id, now, now, req.to, req.subject)
+                            )
+                            app_id = cursor.lastrowid
+                            cursor.execute(
+                                "INSERT INTO application_events (application_id, type, detail) VALUES (?, 'sent', ?)",
+                                (app_id, f"Sent email: '{req.subject}' to {req.to}")
+                            )
+                        conn.commit()
+
+        return {"sent": sent, "id": data.get("id"), "error": data.get("message")}
     except Exception as e:
         return {"sent": False, "error": str(e)}
 
