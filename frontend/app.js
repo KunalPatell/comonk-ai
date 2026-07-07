@@ -388,6 +388,16 @@ function initApp() {
   // GitHub
   $('gh-analyze-btn').addEventListener('click', analyzeGitHub);
 
+  // Language Select
+  const langSel = $('lang-select');
+  if (langSel) {
+    langSel.addEventListener('change', (e) => {
+      if (!S.profile) S.profile = {};
+      S.profile.pref_lang = e.target.value;
+      toast(`Language switched to ${e.target.options[e.target.selectedIndex].text}`, 'info');
+    });
+  }
+
   // Tracker
   $('add-app-btn').addEventListener('click', openAddApp);
 
@@ -823,13 +833,65 @@ function renderAppCard(a, status) {
     <div class="app-card-role">${escHtml(a.role)}</div>
     <div class="app-card-date"><i class="fas fa-calendar" style="font-size:10px;margin-right:3px"></i>${a.date}</div>
     ${a.notes ? `<div style="font-size:11px;color:var(--text-3);margin-top:4px">${escHtml(a.notes)}</div>` : ''}
-    <div class="app-card-actions">
+    <div class="app-card-actions" style="margin-top:8px;display:flex;gap:4px;flex-wrap:wrap">
       ${next[status] ? `<button class="app-card-move-btn" onclick="moveApp(${a.id},'${next[status]}')">${nextLabel[status]}</button>` : ''}
+      ${status === 'applied' ? `
+        <button class="app-card-move-btn" style="color:var(--c-gold-l)" onclick="openSmartFollowup(${a.id})"><i class="fas fa-envelope"></i> Followup</button>
+        <button class="app-card-move-btn" style="color:var(--c-green-l)" onclick="markAppReplied(${a.id})"><i class="fas fa-check"></i> Replied</button>
+      ` : ''}
       ${status === 'offer' ? `<button class="app-card-move-btn" style="color:var(--c-green-l)" onclick="moveApp(${a.id},'saved')">← Back</button>` : ''}
       <button class="app-card-del-btn" onclick="deleteApp(${a.id})" title="Delete"><i class="fas fa-trash"></i></button>
     </div>
   </div>`;
 }
+
+async function openSmartFollowup(appId) {
+  if (!Auth.isLoggedIn()) { toast('Please log in to generate followups', 'warning'); return; }
+  toast('Generating followup email template...', 'info');
+  try {
+    const res = await api('POST', `/api/applications/${appId}/followup`);
+    if (res.success && res.followup_email) {
+      openModal('Smart Follow-up Draft', `
+        <div class="fg">
+          <label style="font-size:11px;font-weight:bold;color:var(--c-purple-l)">AI Drafted Follow-up</label>
+          <textarea class="inp ta-md" id="smart-followup-text" style="font-size:12px;line-height:1.5">${escHtml(res.followup_email)}</textarea>
+        </div>
+      `, `
+        <button class="btn-primary" onclick="navigator.clipboard.writeText($('smart-followup-text').value);toast('Message copied to clipboard!','success')"><i class="fas fa-copy"></i> Copy Follow-up</button>
+        <button class="btn-ghost" onclick="closeModal()">Close</button>
+      `);
+    }
+  } catch (e) {
+    toast('Failed to generate follow-up: ' + e.message, 'error');
+  }
+}
+
+async function markAppReplied(appId) {
+  if (!Auth.isLoggedIn()) return;
+  toast('Processing response context...', 'info');
+  try {
+    const res = await api('POST', `/api/applications/${appId}/mark-replied`);
+    if (res.success) {
+      toast('Application moved to Replied stage!', 'success');
+      loadKanban();
+      if (res.suggested_reply) {
+        openModal('Suggested Response Draft', `
+          <div class="fg">
+            <p class="muted" style="font-size:12px;margin-bottom:8px">HR has contacted you. Here is a suggested response template to coordinate next steps:</p>
+            <textarea class="inp ta-md" id="suggested-reply-text" style="font-size:12px;line-height:1.5">${escHtml(res.suggested_reply)}</textarea>
+          </div>
+        `, `
+          <button class="btn-primary" onclick="navigator.clipboard.writeText($('suggested-reply-text').value);toast('Message copied to clipboard!','success')"><i class="fas fa-copy"></i> Copy Response</button>
+          <button class="btn-ghost" onclick="closeModal()">Close</button>
+        `);
+      }
+    }
+  } catch (e) {
+    toast('Failed to mark replied: ' + e.message, 'error');
+  }
+}
+window.openSmartFollowup = openSmartFollowup;
+window.markAppReplied = markAppReplied;
 
 async function loadKanban() {
   if (Auth.isLoggedIn()) {
@@ -1167,59 +1229,245 @@ window.findReferralRecruiter = findReferralRecruiter;
 /* ── Mock Interview ──────────────────────────────────────────── */
 function initInterview() {
   $('start-iv-btn').addEventListener('click', startInterview);
-  $('iv-end-btn').addEventListener('click', endInterview);
+  $('iv-end-btn').addEventListener('click', endVoiceInterview);
 }
 
-async function startInterview() {
+/* ── Company-Specific Voice Mock Interview ──────────────────── */
+let voiceSessionState = { sessionId: null, currentQuestion: "", totalQuestions: 3, qIdx: 1 };
+let recognition = null;
+let isRecording = false;
+
+function initSTT() {
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRecognition) {
+    console.warn("Speech Recognition API not supported in this browser.");
+    return;
+  }
+  recognition = new SpeechRecognition();
+  recognition.continuous = true;
+  recognition.interimResults = true;
+  recognition.lang = 'en-US';
+
+  recognition.onresult = (event) => {
+    let interimTranscript = '';
+    let finalTranscript = '';
+    for (let i = event.resultIndex; i < event.results.length; ++i) {
+      if (event.results[i].isFinal) {
+        finalTranscript += event.results[i][0].transcript;
+      } else {
+        interimTranscript += event.results[i][0].transcript;
+      }
+    }
+    const txtArea = $('iv-answer-transcript');
+    if (txtArea) {
+      txtArea.value = (txtArea.dataset.prevVal || '') + finalTranscript + interimTranscript;
+    }
+  };
+
+  recognition.onerror = (event) => {
+    console.error("Speech recognition error: " + event.error);
+    stopRecording();
+  };
+}
+
+function startRecording() {
+  if (!recognition) {
+    toast("Speech Recognition is not supported or initialized", "error");
+    return;
+  }
+  const txtArea = $('iv-answer-transcript');
+  txtArea.dataset.prevVal = txtArea.value;
+  recognition.start();
+  isRecording = true;
+  const btn = $('iv-record-btn');
+  btn.innerHTML = '<i class="fas fa-stop"></i> Stop Recording Answer';
+  btn.style.background = 'var(--c-red)';
+  toast("Microphone listening... Speak now!", "info");
+}
+
+function stopRecording() {
+  if (recognition && isRecording) {
+    recognition.stop();
+    isRecording = false;
+    const btn = $('iv-record-btn');
+    btn.innerHTML = '<i class="fas fa-microphone"></i> Start Recording Answer';
+    btn.style.background = 'var(--c-purple)';
+    toast("Recording stopped", "success");
+  }
+}
+
+function speakQuestion(text) {
+  if (window.speechSynthesis) {
+    window.speechSynthesis.cancel();
+  }
+  const utterance = new SpeechSynthesisUtterance(text);
+  const voices = window.speechSynthesis.getVoices();
+  const indVoice = voices.find(v => v.lang.includes('IN') || v.lang.includes('en-IN'));
+  if (indVoice) utterance.voice = indVoice;
+  window.speechSynthesis.speak(utterance);
+}
+
+function initInterview() {
+  // Populate company list
+  const companySelect = $('iv-company');
+  if (companySelect && S.companies && S.companies.length) {
+    companySelect.innerHTML = '<option value="-1">General Technical Interview</option>' + 
+      S.companies.map(c => `<option value="${c.id}">${escHtml(c.name)}</option>`).join('');
+  }
+
+  // Setup listeners
+  const startBtn = $('start-iv-btn');
+  if (startBtn) startBtn.addEventListener('click', startVoiceInterview);
+
+  const recBtn = $('iv-record-btn');
+  if (recBtn) {
+    recBtn.addEventListener('click', () => {
+      if (isRecording) {
+        stopRecording();
+      } else {
+        startRecording();
+      }
+    });
+  }
+
+  const speakBtn = $('iv-speak-btn');
+  if (speakBtn) {
+    speakBtn.addEventListener('click', () => {
+      speakQuestion(voiceSessionState.currentQuestion);
+    });
+  }
+
+  const submitBtn = $('iv-submit-answer-btn');
+  if (submitBtn) {
+    submitBtn.addEventListener('click', submitVoiceAnswer);
+  }
+
+  const endBtn = $('iv-end-btn');
+  if (endBtn) {
+    endBtn.addEventListener('click', endVoiceInterview);
+  }
+
+  initSTT();
+}
+
+async function startVoiceInterview() {
+  if (!Auth.isLoggedIn()) {
+    toast('Please log in to start Mock Interview', 'warning');
+    openAuthModal();
+    return;
+  }
+
   const role = $('iv-role').value.trim() || 'Software Engineer';
-  const level = $('iv-level').value;
-  const count = parseInt($('iv-count').value);
-  $('start-iv-btn').disabled = true;
-  $('start-iv-btn').innerHTML = '<i class="fas fa-spinner fa-spin"></i> Generating…';
+  const companyId = parseInt($('iv-company').value);
+  const difficulty = $('iv-difficulty').value;
+
+  const btn = $('start-iv-btn');
+  btn.disabled = true;
+  btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Initializing session…';
 
   try {
-    const res = await api('POST', '/api/mock-interview', { role, experience_level: level, count });
-    S.ivQuestions = res.questions || [];
-    S.ivIdx = 0;
-    $('iv-setup').style.display = 'none';
-    $('iv-session').style.display = 'block';
-    renderIVQuestions();
-    startIVTimer();
+    const res = await api('POST', '/api/mock-interview/voice/start', {
+      company_id: companyId,
+      role: role,
+      difficulty: difficulty
+    });
 
-    const cnt = parseInt(localStorage.getItem('comonk_iv_count') || '0') + 1;
-    localStorage.setItem('comonk_iv_count', cnt);
-    $('kpi-interviews').textContent = cnt;
+    if (res.success) {
+      voiceSessionState.sessionId = res.session_id;
+      voiceSessionState.currentQuestion = res.first_question;
+      voiceSessionState.totalQuestions = res.total_questions;
+      voiceSessionState.qIdx = 1;
+
+      $('iv-setup').style.display = 'none';
+      $('iv-session').style.display = 'block';
+
+      $('iv-q-label').textContent = `Question 1 / ${res.total_questions}`;
+      $('iv-q-text').textContent = res.first_question;
+      $('iv-prog-fill').style.width = `${(1 / res.total_questions) * 100}%`;
+      $('iv-answer-transcript').value = "";
+      $('iv-feedback-section').style.display = 'none';
+
+      speakQuestion(res.first_question);
+      toast('Interview started! Listen to the question and record your answer.', 'success');
+      startIVTimer();
+    }
   } catch (e) {
-    toast('Interview generation failed: ' + e.message, 'error');
+    toast('Failed to start interview: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '<i class="fas fa-play"></i> Start Interview';
   }
-  $('start-iv-btn').disabled = false;
-  $('start-iv-btn').innerHTML = '<i class="fas fa-play"></i> Start Interview';
 }
 
-function renderIVQuestions() {
-  const total = S.ivQuestions.length;
-  $('iv-q-label').textContent = `${total} questions`;
-  $('iv-prog-fill').style.width = '100%';
-  $('iv-q-list').innerHTML = S.ivQuestions.map((q, i) => {
-    const diff = (q.difficulty || 'Easy').toLowerCase();
-    return `
-    <div class="iv-q-card">
-      <div class="iv-q-top">
-        <div class="iv-q-num">${i + 1}</div>
-        <span class="iv-q-diff ${diff}">${q.difficulty || 'Easy'}</span>
-      </div>
-      <div class="iv-q-text">${escHtml(q.question || '')}</div>
-      <div class="iv-answer-section">
-        <button class="iv-reveal-btn" onclick="toggleAnswer(this)"><i class="fas fa-eye"></i> Reveal Answer</button>
-        <div class="iv-answer-body">
-          <div class="iv-answer-label">Ideal Answer</div>
-          <div class="iv-answer-text">${escHtml(q.ideal_answer || '')}</div>
-          ${q.common_mistake ? `<div class="iv-mistake">${escHtml(q.common_mistake)}</div>` : ''}
-          ${q.follow_up ? `<div style="font-size:13px;color:var(--text-3);margin-top:8px"><strong>Follow-up:</strong> ${escHtml(q.follow_up)}</div>` : ''}
-        </div>
-      </div>
-    </div>`;
-  }).join('');
+function markdownToHtml(md) {
+  if (!md) return "";
+  return md
+    .replace(/### (.*)/g, '<h3>$1</h3>')
+    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(.*?)\*/g, '<em>$1</em>')
+    .replace(/- (.*)/g, '<li>$1</li>')
+    .replace(/\n/g, '<br>');
+}
+
+async function submitVoiceAnswer() {
+  const ans = $('iv-answer-transcript').value.trim();
+  if (!ans) { toast('Please record or type your answer before submitting', 'error'); return; }
+
+  stopRecording();
+
+  const submitBtn = $('iv-submit-answer-btn');
+  submitBtn.disabled = true;
+  submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Evaluating…';
+
+  try {
+    const res = await api('POST', '/api/mock-interview/voice/answer', {
+      session_id: voiceSessionState.sessionId,
+      answer_text: ans
+    });
+
+    if (res.success) {
+      if (res.done) {
+        if (window.speechSynthesis) window.speechSynthesis.cancel();
+        stopIVTimer();
+        openModal('Interview Evaluation Report', `
+          <div class="md-body" style="line-height:1.6;font-size:14px;max-height:450px;overflow-y:auto">
+            ${markdownToHtml(res.report)}
+          </div>
+        `, `<button class="btn-primary" onclick="closeModal();endVoiceInterview()"><i class="fas fa-check"></i> Complete</button>`);
+      } else {
+        voiceSessionState.qIdx += 1;
+        voiceSessionState.currentQuestion = res.next_question;
+
+        $('iv-feedback-text').textContent = `Score: ${res.score}/100. ${res.feedback}`;
+        $('iv-feedback-section').style.display = 'block';
+
+        setTimeout(() => {
+          $('iv-q-label').textContent = `Question ${voiceSessionState.qIdx} / ${voiceSessionState.totalQuestions}`;
+          $('iv-q-text').textContent = voiceSessionState.currentQuestion;
+          $('iv-prog-fill').style.width = `${(voiceSessionState.qIdx / voiceSessionState.totalQuestions) * 100}%`;
+          $('iv-answer-transcript').value = "";
+          $('iv-feedback-section').style.display = 'none';
+
+          speakQuestion(voiceSessionState.currentQuestion);
+        }, 3000);
+      }
+    }
+  } catch (e) {
+    toast('Answer evaluation failed: ' + e.message, 'error');
+  } finally {
+    submitBtn.disabled = false;
+    submitBtn.innerHTML = '<i class="fas fa-paper-plane"></i> Submit Answer';
+  }
+}
+
+function endVoiceInterview() {
+  if (window.speechSynthesis) {
+    window.speechSynthesis.cancel();
+  }
+  stopRecording();
+  stopIVTimer();
+  $('iv-session').style.display = 'none';
+  $('iv-setup').style.display = 'block';
 }
 
 function toggleAnswer(btn) {
@@ -1403,6 +1651,8 @@ async function loadLearning(tab) {
 
     } else if (tab === 'producthunt') {
       await loadProductHuntTab(el);
+    } else if (tab === 'studyplan') {
+      await loadStudyPlan(el);
     }
   } catch(e) {
     el.innerHTML = `<div class="empty-state"><i class="fas fa-wifi"></i><p>Could not load: ${escHtml(e.message)}</p></div>`;
@@ -1449,6 +1699,87 @@ async function loadProductHuntTab(el) {
       <span class="btn-xs ghost">View <i class="fas fa-external-link-alt"></i></span>
     </a>`).join('')}</div>`;
 }
+
+async function loadStudyPlan(el) {
+  el.innerHTML = '<div class="empty-state"><div class="parse-spinner"></div><p>Fetching study plan...</p></div>';
+  try {
+    const res = await api('GET', '/api/learning/plan');
+    const prog = await api('GET', '/api/learning/progress');
+    
+    if (res.success && res.tasks) {
+      const todo = res.tasks.filter(t => t.status === 'todo');
+      const doing = res.tasks.filter(t => t.status === 'doing');
+      const done = res.tasks.filter(t => t.status === 'done');
+      const pct = prog.percentage || 0;
+      
+      el.innerHTML = `
+        <div style="grid-column: 1 / -1; display:flex; justify-content:space-between; align-items:center; padding:12px; background:var(--bg-2); border:1px solid var(--border); border-radius:12px; margin-bottom:12px">
+          <span style="font-weight:bold;color:var(--text)">Study Progress:</span>
+          <div style="display:flex;align-items:center;gap:12px;flex:1;max-width:300px;margin-left:14px">
+            <div style="height:8px;background:var(--bg-3);border-radius:4px;flex:1;overflow:hidden">
+              <div style="height:100%;width:${pct}%;background:linear-gradient(90deg,var(--c-purple),var(--c-green))"></div>
+            </div>
+            <span style="font-weight:bold;font-size:13px">${pct}%</span>
+          </div>
+        </div>
+        <div class="kanban" style="grid-column: 1 / -1; display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; width:100%">
+          <div class="k-col" style="min-height:300px">
+            <div class="k-col-hdr"><span class="k-dot purple"></span>To Learn (${todo.length})</div>
+            <div class="k-cards" style="padding:10px;display:flex;flex-direction:column;gap:8px">
+              ${todo.length ? todo.map(t => renderStudyTaskCard(t)).join('') : '<div class="k-empty">No tasks</div>'}
+            </div>
+          </div>
+          <div class="k-col" style="min-height:300px">
+            <div class="k-col-hdr"><span class="k-dot gold"></span>Learning (${doing.length})</div>
+            <div class="k-cards" style="padding:10px;display:flex;flex-direction:column;gap:8px">
+              ${doing.length ? doing.map(t => renderStudyTaskCard(t)).join('') : '<div class="k-empty">No tasks</div>'}
+            </div>
+          </div>
+          <div class="k-col" style="min-height:300px">
+            <div class="k-col-hdr"><span class="k-dot green"></span>Mastered (${done.length})</div>
+            <div class="k-cards" style="padding:10px;display:flex;flex-direction:column;gap:8px">
+              ${done.length ? done.map(t => renderStudyTaskCard(t)).join('') : '<div class="k-empty">No tasks</div>'}
+            </div>
+          </div>
+        </div>
+      `;
+    }
+  } catch (e) {
+    el.innerHTML = `<div class="empty-state"><p>Failed to load study plan: ${e.message}</p></div>`;
+  }
+}
+
+function renderStudyTaskCard(t) {
+  const nextStatus = t.status === 'todo' ? 'doing' : t.status === 'doing' ? 'done' : null;
+  const nextLabel = t.status === 'todo' ? 'Start Learning' : t.status === 'doing' ? 'Mark Completed' : null;
+  const backStatus = t.status === 'doing' ? 'todo' : t.status === 'done' ? 'doing' : null;
+  
+  return `
+    <div class="app-card" style="padding:12px;background:var(--bg-1);border:1px solid var(--border)">
+      <div style="font-weight:bold;font-size:13px;color:var(--text);margin-bottom:4px;text-transform:capitalize">${escHtml(t.skill)}</div>
+      <a href="${escHtml(t.resource_url)}" target="_blank" style="font-size:11px;color:var(--c-blue-l);display:block;margin-bottom:8px">
+        <i class="fab fa-youtube"></i> Search Tutorials
+      </a>
+      <div style="display:flex;gap:6px">
+        ${nextStatus ? `<button class="btn-xs primary" onclick="updateStudyTask(${t.id}, '${nextStatus}')" style="flex:1;background:var(--c-purple);color:white;font-weight:600">${nextLabel}</button>` : ''}
+        ${backStatus ? `<button class="btn-xs ghost" onclick="updateStudyTask(${t.id}, '${backStatus}')"><i class="fas fa-undo"></i></button>` : ''}
+      </div>
+    </div>
+  `;
+}
+
+async function updateStudyTask(taskId, newStatus) {
+  try {
+    const res = await api('PATCH', `/api/learning/${taskId}`, { status: newStatus });
+    if (res.success) {
+      toast('Planner updated!', 'success');
+      loadLearning('studyplan');
+    }
+  } catch (e) {
+    toast('Failed to update task: ' + e.message, 'error');
+  }
+}
+window.updateStudyTask = updateStudyTask;
 
 /* ── Cheat Sheets (cheatography.com) ──────────────────────────── */
 async function loadCheatsheets(el, skills) {
@@ -4310,6 +4641,7 @@ function initResumeStudio(){
       $$('.rs-tab').forEach(x=>x.classList.remove('active')); t.classList.add('active');
       $('rs-pane-rewrite').style.display = t.dataset.rs==='rewrite'?'block':'none';
       $('rs-pane-cover').style.display = t.dataset.rs==='cover'?'block':'none';
+      $('rs-pane-jdgap').style.display = t.dataset.rs==='jdgap'?'block':'none';
     });
   });
   const role=(S.profile?.target_roles&&S.profile.target_roles[0])||S.profile?.target_role||'AI/ML Engineer';
@@ -4322,6 +4654,64 @@ function initResumeStudio(){
   }
   const rb=$('rs-rewrite-btn'); if(rb&&!rb.dataset.wired){ rb.dataset.wired='1'; rb.addEventListener('click', rsRewrite); }
   const cb=$('cl-gen-btn'); if(cb&&!cb.dataset.wired){ cb.dataset.wired='1'; cb.addEventListener('click', clGenerate); }
+
+  const jdb=$('rs-jd-analyze-btn'); 
+  if(jdb && !jdb.dataset.wired){ 
+    jdb.dataset.wired='1'; 
+    jdb.addEventListener('click', rsJdAnalyze); 
+  }
+}
+
+async function rsJdAnalyze() {
+  const jdText = $('rs-jd-text').value.trim();
+  if (jdText.length < 30) { toast('Please paste a target Job Description first', 'error'); return; }
+  
+  const out = $('rs-jd-out');
+  out.innerHTML = '<div class="empty-state"><div class="parse-spinner"></div><p>Analyzing skill gaps & tailoring resume...</p></div>';
+  
+  try {
+    const gapRes = await api('POST', '/api/jd-gap', { jd_text: jdText });
+    const tailorRes = await api('POST', '/api/tailor-resume', { jd_text: jdText });
+    
+    if (gapRes.success && tailorRes.success) {
+      out.innerHTML = `
+        <div style="display:flex;flex-direction:column;gap:16px;max-height:480px;overflow-y:auto;padding-right:6px">
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:12px;background:rgba(124,58,237,0.06);border:1px solid rgba(124,58,237,0.15);border-radius:12px">
+            <span style="font-weight:bold;color:var(--text)">ATS Match Percentage:</span>
+            <span class="badge ${gapRes.match_pct >= 75 ? 'green' : gapRes.match_pct >= 45 ? 'purple' : 'red'}" style="font-size:14px;padding:4px 12px">${gapRes.match_pct}%</span>
+          </div>
+          
+          <div class="form-row-2">
+            <div>
+              <h5 style="font-weight:bold;margin-bottom:6px;color:var(--c-green-l)"><i class="fas fa-check"></i> Present Skills</h5>
+              <div class="skill-chips">
+                ${gapRes.present_skills.map(s => `<span class="skill-chip" style="background:rgba(16,185,129,0.12);color:var(--c-green);border-color:rgba(16,185,129,0.25)">${escHtml(s)}</span>`).join('')}
+              </div>
+            </div>
+            <div>
+              <h5 style="font-weight:bold;margin-bottom:6px;color:var(--c-gold-l)"><i class="fas fa-triangle-exclamation"></i> Gaps Detected</h5>
+              <div class="skill-chips">
+                ${gapRes.missing_skills.map(s => `<span class="skill-chip" style="background:rgba(245,158,11,0.12);color:var(--c-gold-l);border-color:rgba(245,158,11,0.25)">${escHtml(s)}</span>`).join('')}
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <h5 style="font-weight:bold;margin-bottom:6px;color:var(--c-purple-l)"><i class="fas fa-sparkles"></i> Suggested Tailored Bullets</h5>
+            <pre class="inp ta-md" style="font-size:12px;background:var(--bg-1);line-height:1.5;white-space:pre-wrap;padding:10px">${escHtml(tailorRes.tailored_bullets)}</pre>
+          </div>
+
+          <div>
+            <h5 style="font-weight:bold;margin-bottom:6px;color:var(--c-blue-l)"><i class="fas fa-envelope-open-text"></i> Tailored Cover Letter</h5>
+            <pre class="inp ta-md" style="font-size:12px;background:var(--bg-1);line-height:1.5;white-space:pre-wrap;padding:10px">${escHtml(tailorRes.cover_letter)}</pre>
+          </div>
+        </div>
+      `;
+      toast('Analysis complete and learning planner updated!', 'success');
+    }
+  } catch (e) {
+    out.innerHTML = `<div class="empty-state" style="color:var(--c-red)"><i class="fas fa-triangle-exclamation"></i><p>Failed to analyze: ${e.message}</p></div>`;
+  }
 }
 
 async function rsRewrite(){

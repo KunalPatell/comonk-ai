@@ -130,6 +130,25 @@ def _init_db():
             body TEXT DEFAULT '',
             status TEXT DEFAULT 'pending'
         );
+        CREATE TABLE IF NOT EXISTS learning_progress (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            skill TEXT NOT NULL,
+            resource_url TEXT DEFAULT '',
+            status TEXT DEFAULT 'todo',
+            updated_at REAL DEFAULT (strftime('%s','now'))
+        );
+        CREATE TABLE IF NOT EXISTS interview_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            company_id INTEGER,
+            role TEXT,
+            questions TEXT,
+            answers TEXT,
+            scores TEXT,
+            report TEXT DEFAULT '',
+            created_at REAL DEFAULT (strftime('%s','now'))
+        );
         """)
 _init_db()
 
@@ -139,7 +158,9 @@ def _migrate():
         ("users", "profile_json", "TEXT DEFAULT ''"),
         ("applications", "custom_company_name", "TEXT DEFAULT ''"),
         ("autopilot_runs", "id", "INTEGER PRIMARY KEY AUTOINCREMENT"),
-        ("autopilot_drafts", "id", "INTEGER PRIMARY KEY AUTOINCREMENT")
+        ("autopilot_drafts", "id", "INTEGER PRIMARY KEY AUTOINCREMENT"),
+        ("learning_progress", "id", "INTEGER PRIMARY KEY AUTOINCREMENT"),
+        ("interview_sessions", "id", "INTEGER PRIMARY KEY AUTOINCREMENT")
     ]
     with _db() as c:
         for table, col, decl in cols:
@@ -447,6 +468,24 @@ class AutopilotRunRequest(BaseModel):
 class AutopilotApproveRequest(BaseModel):
     approved_drafts: List[int]
     rejected_drafts: List[int]
+
+class JdGapRequest(BaseModel):
+    jd_text: str
+
+class TailorResumeRequest(BaseModel):
+    jd_text: str
+
+class LearningPatchRequest(BaseModel):
+    status: str
+
+class VoiceInterviewStartRequest(BaseModel):
+    company_id: int
+    role: str
+    difficulty: str = "medium"
+
+class VoiceInterviewAnswerRequest(BaseModel):
+    session_id: int
+    answer_text: str
 
 class ChatRequest(BaseModel):
     message: str
@@ -1527,6 +1566,432 @@ def api_autopilot_history(request: Request):
 
     return {"success": True, "runs": [dict(r) for r in rows]}
 
+@app.post("/api/applications/{app_id}/mark-replied")
+def api_mark_replied(app_id: int, request: Request):
+    auth_header = request.headers.get("Authorization")
+    if not auth_header:
+        raise HTTPException(401, "Missing Authorization Header")
+    user = _auth(auth_header)
+    if not user:
+        raise HTTPException(401, "Invalid session")
+
+    with _db() as conn:
+        cursor = conn.cursor()
+        app = cursor.execute("SELECT * FROM applications WHERE id = ? AND user_id = ?", (app_id, user["id"])).fetchone()
+        if not app:
+            raise HTTPException(404, "Application not found")
+        
+        a = dict(app)
+        comp_id = a["company_id"]
+        comp = COMPANIES[comp_id] if 0 <= comp_id < len(COMPANIES) else {}
+        comp_name = comp.get("name", a.get("custom_company_name") or "the company")
+
+        now = time.time()
+        cursor.execute(
+            "UPDATE applications SET status = 'replied', last_action_at = ?, next_followup_at = 0 WHERE id = ?",
+            (now, app_id)
+        )
+        cursor.execute(
+            "INSERT INTO application_events (application_id, type, detail) VALUES (?, 'replied', ?)",
+            (app_id, "HR reply detected or marked. Advancing pipeline to replied stage.")
+        )
+        conn.commit()
+
+    suggested = (
+        f"Subject: Re: Application / Follow-up - {user.get('name', 'Applicant')}\n\n"
+        f"Dear HR Team,\n\n"
+        f"Thank you for your response. I am very glad to hear back from you.\n"
+        f"I am open to coordinating next steps or an interview schedule. Please let me know your availability.\n\n"
+        f"Best regards,\n{user.get('name', 'Applicant')}"
+    )
+
+    if llm_enabled():
+        try:
+            prompt = (
+                f"Write a short, professional response email to HR. They just replied to our application.\n"
+                f"Applicant Name: {user.get('name', 'Applicant')}\n"
+                f"Company: {comp_name}\n\n"
+                f"Return ONLY the email body (subject and content)."
+            )
+            ai_msg = llm_complete(prompt, system="Professional email assistant.", max_tokens=250)
+            if ai_msg:
+                suggested = ai_msg
+        except Exception:
+            pass
+
+    return {
+        "success": True,
+        "suggested_reply": suggested
+    }
+
+
+@app.post("/api/applications/{app_id}/followup")
+def api_generate_followup(app_id: int, request: Request):
+    auth_header = request.headers.get("Authorization")
+    if not auth_header:
+        raise HTTPException(401, "Missing Authorization Header")
+    user = _auth(auth_header)
+    if not user:
+        raise HTTPException(401, "Invalid session")
+
+    with _db() as conn:
+        app = conn.execute("SELECT * FROM applications WHERE id = ? AND user_id = ?", (app_id, user["id"])).fetchone()
+        if not app:
+            raise HTTPException(404, "Application not found")
+        a = dict(app)
+        comp_id = a["company_id"]
+        comp = COMPANIES[comp_id] if 0 <= comp_id < len(COMPANIES) else {}
+        comp_name = comp.get("name", a.get("custom_company_name") or "the company")
+
+    followup_body = (
+        f"Subject: Following up: Application for Software role at {comp_name}\n\n"
+        f"Dear Hiring Manager,\n\n"
+        f"I am writing to briefly follow up on the application I submitted recently. "
+        f"I remain highly interested in joining the team at {comp_name} and would love to connect if there are updates.\n\n"
+        f"Best regards,\n{user.get('name', 'Applicant')}"
+    )
+
+    if llm_enabled():
+        try:
+            prompt = (
+                f"Write a short, polite follow-up email to HR (max 80 words).\n"
+                f"Applicant: {user.get('name', 'Applicant')}\n"
+                f"Company: {comp_name}\n"
+                f"Return ONLY the follow-up email."
+            )
+            ai_msg = llm_complete(prompt, system="Hiring manager follow-up writer.", max_tokens=150)
+            if ai_msg:
+                followup_body = ai_msg
+        except Exception:
+            pass
+
+    return {
+        "success": True,
+        "followup_email": followup_body
+    }
+
+
+@app.post("/api/mock-interview/voice/start")
+def api_voice_interview_start(req: VoiceInterviewStartRequest, request: Request):
+    auth_header = request.headers.get("Authorization")
+    if not auth_header:
+        raise HTTPException(401, "Missing Authorization Header")
+    user = _auth(auth_header)
+    if not user:
+        raise HTTPException(401, "Invalid session")
+
+    comp_name = "Tech Partner"
+    comp_stack = req.role
+    if 0 <= req.company_id < len(COMPANIES):
+        c = COMPANIES[req.company_id]
+        comp_name = c["name"]
+        comp_stack = c.get("roles", req.role)
+
+    questions = [
+        f"Can you explain your experience building technical solutions, and what stacks you typically use?",
+        f"How would you approach optimizing database and API latency in a client-server architecture?",
+        f"What is your debugging strategy when a production system crashes unexpectedly?"
+    ]
+
+    if llm_enabled():
+        try:
+            prompt = (
+                f"Generate 3 technical interview questions for a '{req.role}' role at '{comp_name}' (Tech Stack: {comp_stack}).\n"
+                f"Difficulty: {req.difficulty}.\n"
+                f"Return ONLY a JSON array of 3 string questions. Example: [\"Q1\", \"Q2\", \"Q3\"]"
+            )
+            ai_q = _parse_json(llm_complete(prompt, system="Technical interviewer. Return only JSON array.", max_tokens=300))
+            if ai_q and isinstance(ai_q, list) and len(ai_q) >= 3:
+                questions = ai_q[:3]
+        except Exception:
+            pass
+
+    now = time.time()
+    with _db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO interview_sessions 
+               (user_id, company_id, role, questions, answers, scores, report, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (user["id"], req.company_id, req.role, json.dumps(questions), json.dumps([]), json.dumps([]), "", now)
+        )
+        session_id = cursor.lastrowid
+        conn.commit()
+
+    return {
+        "success": True,
+        "session_id": session_id,
+        "first_question": questions[0],
+        "total_questions": len(questions)
+    }
+
+
+@app.post("/api/mock-interview/voice/answer")
+def api_voice_interview_answer(req: VoiceInterviewAnswerRequest, request: Request):
+    auth_header = request.headers.get("Authorization")
+    if not auth_header:
+        raise HTTPException(401, "Missing Authorization Header")
+    user = _auth(auth_header)
+    if not user:
+        raise HTTPException(401, "Invalid session")
+
+    with _db() as conn:
+        cursor = conn.cursor()
+        session = cursor.execute("SELECT * FROM interview_sessions WHERE id = ? AND user_id = ?", (req.session_id, user["id"])).fetchone()
+        if not session:
+            raise HTTPException(404, "Interview session not found")
+        
+        s = dict(session)
+        questions = json.loads(s["questions"])
+        answers = json.loads(s["answers"])
+        scores = json.loads(s["scores"])
+
+    current_idx = len(answers)
+    if current_idx >= len(questions):
+        return {"success": True, "done": True, "report": s.get("report", "")}
+
+    current_question = questions[current_idx]
+    
+    score_val = 75
+    feedback = "Good response, try to elaborate with concrete code examples."
+    if llm_enabled():
+        try:
+            prompt = (
+                f"Question: {current_question}\n"
+                f"Candidate Answer: {req.answer_text}\n\n"
+                f"Score this answer 0 to 100 and provide constructive feedback.\n"
+                f"Return ONLY JSON format: {{\"score\": 85, \"feedback\": \"...\"}}"
+            )
+            res = _parse_json(llm_complete(prompt, system="Technical evaluator. Return JSON.", max_tokens=250))
+            if res and "score" in res:
+                score_val = int(res["score"])
+                feedback = res["feedback"]
+        except Exception:
+            pass
+
+    answers.append(req.answer_text)
+    scores.append({"score": score_val, "feedback": feedback})
+
+    done = len(answers) >= len(questions)
+    report = ""
+
+    if done:
+        avg_score = int(sum(x["score"] for x in scores) / len(scores))
+        report = (
+            f"### Interview Evaluation Report\n\n"
+            f"**Overall Score:** {avg_score}/100\n\n"
+            f"**Details:**\n"
+        )
+        for idx, (q, ans, sc) in enumerate(zip(questions, answers, scores)):
+            report += f"- **Q{idx+1}:** {q}\n"
+            report += f"  - *Answer:* \"{ans}\"\n"
+            report += f"  - *Evaluation ({sc['score']}/100):* {sc['feedback']}\n\n"
+
+        if llm_enabled():
+            try:
+                prompt = (
+                    f"Create a summary feedback report (max 100 words).\n"
+                    f"Questions: {json.dumps(questions)}\n"
+                    f"Scores: {json.dumps(scores)}\n"
+                    f"Return ONLY the markdown feedback report."
+                )
+                ai_report = llm_complete(prompt, system="Senior Career Coach.", max_tokens=300)
+                if ai_report:
+                    report = ai_report
+            except Exception:
+                pass
+
+    with _db() as conn:
+        conn.execute(
+            "UPDATE interview_sessions SET answers = ?, scores = ?, report = ? WHERE id = ?",
+            (json.dumps(answers), json.dumps(scores), report, req.session_id)
+        )
+        conn.commit()
+
+    return {
+        "success": True,
+        "done": done,
+        "score": score_val,
+        "feedback": feedback,
+        "next_question": questions[current_idx + 1] if not done else None,
+        "report": report if done else ""
+    }
+
+
+@app.post("/api/jd-gap")
+def api_jd_gap(req: JdGapRequest, request: Request):
+    auth_header = request.headers.get("Authorization")
+    if not auth_header:
+        raise HTTPException(401, "Missing Authorization Header")
+    user = _auth(auth_header)
+    if not user:
+        raise HTTPException(401, "Invalid session")
+
+    profile_json = user.get("profile_json")
+    user_skills = []
+    if profile_json:
+        try:
+            profile = json.loads(profile_json)
+            user_skills = profile.get("skills", [])
+        except Exception:
+            pass
+
+    jd_skills = []
+    jd_lower = req.jd_text.lower()
+    for keyword in SKILL_KEYWORDS:
+        if keyword in jd_lower:
+            jd_skills.append(keyword)
+
+    if not jd_skills:
+        jd_skills = ["communication", "teamwork", "software engineering"]
+
+    user_skills_lower = [s.lower() for s in user_skills]
+    present = [s for s in jd_skills if s in user_skills_lower]
+    missing = [s for s in jd_skills if s not in user_skills_lower]
+
+    match_pct = 100
+    if jd_skills:
+        match_pct = int((len(present) / len(jd_skills)) * 100)
+
+    if missing:
+        with _db() as conn:
+            for s in missing:
+                existing = conn.execute(
+                    "SELECT id FROM learning_progress WHERE user_id = ? AND skill = ?",
+                    (user["id"], s)
+                ).fetchone()
+                if not existing:
+                    url = f"https://www.youtube.com/results?search_query=learn+{s.replace(' ', '+')}"
+                    conn.execute(
+                        "INSERT INTO learning_progress (user_id, skill, resource_url, status) VALUES (?, ?, ?, ?)",
+                        (user["id"], s, url, "todo")
+                    )
+            conn.commit()
+
+    return {
+        "success": True,
+        "match_pct": match_pct,
+        "present_skills": present,
+        "missing_skills": missing
+    }
+
+
+@app.post("/api/tailor-resume")
+def api_tailor_resume(req: TailorResumeRequest, request: Request):
+    auth_header = request.headers.get("Authorization")
+    if not auth_header:
+        raise HTTPException(401, "Missing Authorization Header")
+    user = _auth(auth_header)
+    if not user:
+        raise HTTPException(401, "Invalid session")
+
+    profile_json = user.get("profile_json") or "{}"
+    
+    tailored_bullets = "- Engineered high-throughput backend services using target stack.\n- Optimized data queries and database retrieval latency."
+    cover_letter = f"Dear Hiring Team,\n\nI am writing to express my interest in joining your team. I bring a strong background in software development..."
+
+    if llm_enabled():
+        try:
+            prompt = (
+                f"User Profile: {profile_json}\n"
+                f"Target JD: {req.jd_text}\n\n"
+                f"Tailor the resume bullets and write a concise cover letter.\n"
+                f"Return ONLY JSON: {{\"bullets\": \"...\", \"cover_letter\": \"...\"}}"
+            )
+            res = _parse_json(llm_complete(prompt, system="Professional resume tailor.", max_tokens=500))
+            if res and res.get("bullets"):
+                tailored_bullets = res["bullets"]
+                cover_letter = res["cover_letter"]
+        except Exception:
+            pass
+
+    return {
+        "success": True,
+        "tailored_bullets": tailored_bullets,
+        "cover_letter": cover_letter
+    }
+
+
+@app.get("/api/learning/plan")
+def api_learning_plan(request: Request):
+    auth_header = request.headers.get("Authorization")
+    if not auth_header:
+        raise HTTPException(401, "Missing Authorization Header")
+    user = _auth(auth_header)
+    if not user:
+        raise HTTPException(401, "Invalid session")
+
+    with _db() as conn:
+        rows = conn.execute("SELECT * FROM learning_progress WHERE user_id = ?", (user["id"],)).fetchall()
+
+    tasks = [dict(r) for r in rows]
+
+    if not tasks:
+        default_skills = ["system design", "rest api", "git", "cloud computing"]
+        with _db() as conn:
+            for s in default_skills:
+                url = f"https://www.youtube.com/results?search_query=learn+{s.replace(' ', '+')}"
+                conn.execute(
+                    "INSERT INTO learning_progress (user_id, skill, resource_url, status) VALUES (?, ?, ?, ?)",
+                    (user["id"], s, url, "todo")
+                )
+            conn.commit()
+            rows = conn.execute("SELECT * FROM learning_progress WHERE user_id = ?", (user["id"],)).fetchall()
+        tasks = [dict(r) for r in rows]
+
+    return {
+        "success": True,
+        "tasks": tasks
+    }
+
+
+@app.patch("/api/learning/{task_id}")
+def api_update_learning_task(task_id: int, req: LearningPatchRequest, request: Request):
+    auth_header = request.headers.get("Authorization")
+    if not auth_header:
+        raise HTTPException(401, "Missing Authorization Header")
+    user = _auth(auth_header)
+    if not user:
+        raise HTTPException(401, "Invalid session")
+
+    now = time.time()
+    with _db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE learning_progress SET status = ?, updated_at = ? WHERE id = ? AND user_id = ?",
+            (req.status, now, task_id, user["id"])
+        )
+        conn.commit()
+
+    return {"success": True}
+
+
+@app.get("/api/learning/progress")
+def api_learning_progress(request: Request):
+    auth_header = request.headers.get("Authorization")
+    if not auth_header:
+        raise HTTPException(401, "Missing Authorization Header")
+    user = _auth(auth_header)
+    if not user:
+        raise HTTPException(401, "Invalid session")
+
+    with _db() as conn:
+        todo = conn.execute("SELECT COUNT(id) FROM learning_progress WHERE user_id = ? AND status = 'todo'", (user["id"],)).fetchone()[0]
+        doing = conn.execute("SELECT COUNT(id) FROM learning_progress WHERE user_id = ? AND status = 'doing'", (user["id"],)).fetchone()[0]
+        done = conn.execute("SELECT COUNT(id) FROM learning_progress WHERE user_id = ? AND status = 'done'", (user["id"],)).fetchone()[0]
+
+    total = todo + doing + done
+    pct = int((done / total) * 100) if total > 0 else 0
+
+    return {
+        "success": True,
+        "todo": todo,
+        "doing": doing,
+        "done": done,
+        "percentage": pct
+    }
+
+
 @app.get("/api/companies/{company_id}")
 def api_company_detail(company_id: int):
     if company_id < 0 or company_id >= len(COMPANIES):
@@ -1621,8 +2086,15 @@ def api_chat(req: ChatRequest):
         profile_ctx = (f" User: {profile.get('name','')}, Skills: {', '.join((profile.get('skills') or [])[:8])}, "
                        f"Level: {profile.get('seniority_level','fresher')}")
 
+    pref_lang = profile.get("pref_lang", "en") if profile else "en"
+    lang_inst = ""
+    if pref_lang == "gu":
+        lang_inst = " Respond strictly in Gujarati (ગુજરાતી) language."
+    elif pref_lang == "hi":
+        lang_inst = " Respond strictly in Hindi (हिंदी) language."
+
     system = ("You are Comonk AI, a free career counselor for Gujarat's IT market. "
-              "Help job seekers in Ahmedabad/Gandhinagar. Be encouraging, concise (< 180 words)." + profile_ctx)
+              "Help job seekers in Ahmedabad/Gandhinagar. Be encouraging, concise (< 180 words)." + profile_ctx + lang_inst)
 
     if llm_enabled():
         messages_list = [{"role":"system","content":system}]
