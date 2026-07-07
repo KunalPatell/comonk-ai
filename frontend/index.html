@@ -283,6 +283,7 @@
       <button class="sb-item" data-panel="targets"><i class="fas fa-building"></i><span>Job Targets</span><span class="sb-badge" id="sb-targets-count">0</span></button>
       <button class="sb-item" data-panel="livejobs"><i class="fas fa-briefcase"></i><span>Live Jobs</span></button>
       <button class="sb-item" data-panel="tracker"><i class="fas fa-columns"></i><span>App Tracker</span><span class="sb-badge" id="sb-tracker-count">0</span></button>
+      <button class="sb-item" data-panel="autopilot"><i class="fas fa-robot"></i><span>Autopilot Agent</span><span class="sb-badge new">FLAGSHIP</span></button>
 
       <div class="sb-nav-label" style="margin-top:20px">AI TOOLS</div>
       <button class="sb-item" data-panel="mockvoice"><i class="fas fa-microphone-lines"></i><span>AI Mock Interview</span><span class="sb-badge new">NEW</span></button>
@@ -510,6 +511,84 @@
         <div class="k-col" data-status="interview"><div class="k-col-hdr"><span class="k-dot gold"></span>Interview<span class="k-cnt" id="kc-interview">0</span></div><div class="k-cards" id="col-interview"><div class="k-empty">Interviews here</div></div></div>
         <div class="k-col" data-status="offer"><div class="k-col-hdr"><span class="k-dot green"></span>Offer<span class="k-cnt" id="kc-offer">0</span></div><div class="k-cards" id="col-offer"><div class="k-empty">Offers here</div></div></div>
         <div class="k-col" data-status="rejected"><div class="k-col-hdr"><span class="k-dot red"></span>Rejected<span class="k-cnt" id="kc-rejected">0</span></div><div class="k-cards" id="col-rejected"><div class="k-empty">Rejections here</div></div></div>
+      </div>
+    </div>
+
+    <!-- Autopilot Panel -->
+    <div id="panel-autopilot" class="panel">
+      <div class="panel-hdr">
+        <div>
+          <h2><i class="fas fa-robot"></i> Job-Hunt Autopilot</h2>
+          <div class="panel-hdr-sub">Chains resume analysis, target matching, and personalized outreach automatically.</div>
+        </div>
+      </div>
+
+      <div class="ov-grid" style="grid-template-columns: 1fr 2fr; gap: 20px">
+        <!-- Configuration Card -->
+        <div class="card" style="align-self: start">
+          <h4 style="font-size:14px;font-weight:700;margin-bottom:14px;color:var(--c-purple-l)"><i class="fas fa-sliders"></i> Configure Run</h4>
+          <div style="display:flex;flex-direction:column;gap:14px">
+            <div class="fg">
+              <label>Target Role</label>
+              <input class="inp" id="ap-role" placeholder="e.g. AI/ML Engineer">
+            </div>
+            <div class="fg">
+              <label>Outreach Tone</label>
+              <select class="inp" id="ap-tone">
+                <option value="professional">Professional</option>
+                <option value="enthusiastic">Enthusiastic & Tech-heavy</option>
+                <option value="creative">Creative & Direct</option>
+              </select>
+            </div>
+            <div class="fg">
+              <label>Companies count</label>
+              <div style="display:flex;align-items:center;gap:10px">
+                <input type="range" id="ap-count" min="1" max="10" value="5" style="flex:1">
+                <span id="ap-count-val" style="font-weight:bold">5</span>
+              </div>
+            </div>
+            <button class="btn-primary" id="ap-run-btn" style="width:100%;margin-top:10px;justify-content:center">
+              <i class="fas fa-play"></i> Start Autopilot Run
+            </button>
+          </div>
+        </div>
+
+        <!-- Active Queue / Status Card -->
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+            <h4 style="font-size:14px;font-weight:700;color:var(--c-blue-l)"><i class="fas fa-clipboard-list"></i> Outbox Approval Queue</h4>
+            <span class="badge purple" id="ap-status-badge">Idle</span>
+          </div>
+
+          <div id="ap-queue-container" style="display:flex;flex-direction:column;gap:16px">
+            <div class="empty-state">
+              <i class="fas fa-robot" style="font-size:48px;color:var(--text-3)"></i>
+              <p>Configure and launch autopilot to search Ahmedabad companies and draft tailored outreach emails.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- History log -->
+      <div class="card" style="margin-top:20px">
+        <h4 style="margin-bottom:12px;font-weight:700"><i class="fas fa-history"></i> Autopilot Run History</h4>
+        <div class="overflow-x-auto">
+          <table class="w-full text-left text-sm" style="border-collapse:collapse;width:100%">
+            <thead>
+              <tr style="border-bottom:1px solid var(--border);color:var(--text-3)">
+                <th style="padding:10px 0;width:20%">Date</th>
+                <th style="width:30%">Target Role</th>
+                <th style="width:20%">Status</th>
+                <th style="width:30%">Outcome Summary</th>
+              </tr>
+            </thead>
+            <tbody id="ap-history-tbody">
+              <tr>
+                <td colspan="4" style="text-align:center;padding:20px;color:var(--text-3)">No runs registered yet</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
 

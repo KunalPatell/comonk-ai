@@ -112,6 +112,24 @@ def _init_db():
             detail TEXT DEFAULT '',
             created_at REAL DEFAULT (strftime('%s','now'))
         );
+        CREATE TABLE IF NOT EXISTS autopilot_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            status TEXT DEFAULT 'pending_approval',
+            params TEXT DEFAULT '{}',
+            summary TEXT DEFAULT '{}',
+            created_at REAL DEFAULT (strftime('%s','now'))
+        );
+        CREATE TABLE IF NOT EXISTS autopilot_drafts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id INTEGER NOT NULL,
+            company_id INTEGER NOT NULL,
+            custom_company_name TEXT DEFAULT '',
+            email_to TEXT DEFAULT '',
+            subject TEXT DEFAULT '',
+            body TEXT DEFAULT '',
+            status TEXT DEFAULT 'pending'
+        );
         """)
 _init_db()
 
@@ -119,7 +137,9 @@ def _migrate():
     """Add columns to existing DBs (CREATE TABLE IF NOT EXISTS won't add them)."""
     cols = [
         ("users", "profile_json", "TEXT DEFAULT ''"),
-        ("applications", "custom_company_name", "TEXT DEFAULT ''")
+        ("applications", "custom_company_name", "TEXT DEFAULT ''"),
+        ("autopilot_runs", "id", "INTEGER PRIMARY KEY AUTOINCREMENT"),
+        ("autopilot_drafts", "id", "INTEGER PRIMARY KEY AUTOINCREMENT")
     ]
     with _db() as c:
         for table, col, decl in cols:
@@ -281,7 +301,33 @@ def load_companies():
     wb.close()
     print(f"[DB] {len(COMPANIES)} companies loaded")
 
+RECRUITERS: List[dict] = []
+
+def load_recruiters():
+    if not os.path.exists(EXCEL_PATH):
+        return
+    try:
+        wb = openpyxl.load_workbook(EXCEL_PATH, read_only=True)
+        if "LinkedIn Profiles" in wb.sheetnames:
+            ws = wb["LinkedIn Profiles"]
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                if not row[0] or not row[4]:
+                    continue
+                RECRUITERS.append({
+                    "name": str(row[0]).strip(),
+                    "category": str(row[1] or "IT Company").strip(),
+                    "city": str(row[2] or "Ahmedabad").strip(),
+                    "phone": str(row[3] or "").strip(),
+                    "linkedin": str(row[4]).strip(),
+                    "notes": str(row[5] or "").strip()
+                })
+            print(f"[DB] {len(RECRUITERS)} recruiters loaded")
+        wb.close()
+    except Exception as e:
+        print(f"[DB] Failed to load recruiters: {e}")
+
 load_companies()
+load_recruiters()
 
 # ── Skill extraction ──────────────────────────────────────────────────────────
 SKILL_KEYWORDS = [
@@ -392,6 +438,15 @@ class ApplicationPatchRequest(BaseModel):
     status: Optional[str] = None
     notes: Optional[str] = None
     next_followup_at: Optional[float] = None
+
+class AutopilotRunRequest(BaseModel):
+    target_role: str
+    num_companies: int = 5
+    tone: str = "professional"
+
+class AutopilotApproveRequest(BaseModel):
+    approved_drafts: List[int]
+    rejected_drafts: List[int]
 
 class ChatRequest(BaseModel):
     message: str
@@ -1112,6 +1167,365 @@ def get_due_followups(request: Request):
         out.append(d)
 
     return {"success": True, "followups": out}
+
+@app.get("/api/referrals/{company_id}")
+def api_referral_finder(company_id: int, request: Request):
+    auth_header = request.headers.get("Authorization")
+    if not auth_header:
+        raise HTTPException(401, "Missing Authorization Header")
+    user = _auth(auth_header)
+    if not user:
+        raise HTTPException(401, "Invalid session")
+
+    if company_id < 0 or company_id >= len(COMPANIES):
+        raise HTTPException(400, "Invalid company ID")
+    c = COMPANIES[company_id]
+    c_name = c["name"].lower()
+
+    matched = None
+    # 1. Direct notes/linkedin match
+    for r in RECRUITERS:
+        if c_name in r["notes"].lower() or c_name in r["linkedin"].lower():
+            matched = r
+            break
+
+    # 2. Deterministic city fallback
+    if not matched:
+        city = c["address"].split(",")[-1].strip() if c["address"] else "Ahmedabad"
+        city_recs = [r for r in RECRUITERS if city.lower() in r["city"].lower()]
+        if not city_recs:
+            city_recs = [r for r in RECRUITERS if "ahmedabad" in r["city"].lower()]
+        if not city_recs:
+            city_recs = RECRUITERS
+
+        if city_recs:
+            matched = city_recs[company_id % len(city_recs)]
+
+    if not matched:
+        matched = {
+            "name": "Krunal Patel",
+            "linkedin": "http://www.linkedin.com/in/kunal-patel",
+            "city": "Ahmedabad",
+            "category": "IT Recruiter",
+            "phone": "",
+            "notes": ""
+        }
+
+    # Generate intro note
+    intro_note = (
+        f"Hi {matched['name']},\n\n"
+        f"I noticed your profile matching recruitment in {matched['city']}. "
+        f"I'm an AI/ML Engineer (or Software Developer) with hands-on experience in modern stacks. "
+        f"I'm very interested in opportunities at {c['name']} and would love to connect. Thanks!"
+    )
+
+    if llm_enabled():
+        try:
+            prompt = (
+                f"Write a short, highly professional LinkedIn connection request message (max 280 characters).\n"
+                f"Recipient Name: {matched['name']}.\n"
+                f"Company: {c['name']}.\n"
+                f"City: {matched['city']}.\n"
+                f"Return ONLY the message, no extra notes or tags."
+            )
+            ai_msg = llm_complete(prompt, system="LinkedIn connection message writer.", max_tokens=150).strip()
+            if ai_msg:
+                intro_note = ai_msg
+        except Exception:
+            pass
+
+    return {
+        "success": True,
+        "recruiter": matched,
+        "suggested_message": intro_note
+    }
+
+
+@app.post("/api/autopilot/run")
+def api_autopilot_run(req: AutopilotRunRequest, request: Request):
+    auth_header = request.headers.get("Authorization")
+    if not auth_header:
+        raise HTTPException(401, "Missing Authorization Header")
+    user = _auth(auth_header)
+    if not user:
+        raise HTTPException(401, "Invalid session")
+
+    # Load profile
+    profile_json = user.get("profile_json")
+    if not profile_json:
+        raise HTTPException(400, "Please upload your resume in the Overview section first before running Autopilot.")
+
+    try:
+        profile = json.loads(profile_json)
+    except Exception:
+        raise HTTPException(500, "Failed to parse user profile. Please re-upload your resume.")
+
+    skills = profile.get("skills", [])
+    if not skills:
+        raise HTTPException(400, "No skills found in your profile. Please add skills or re-upload your resume.")
+
+    # Match top N companies using calculate_fit_score
+    user_city = user.get("city") or "Ahmedabad"
+    
+    # Try semantic RAG first, fall back to keyword
+    matched_list = []
+    try:
+        from comonk_rag import search_companies
+        query = " ".join(skills[:10])
+        rag_results = search_companies(query, n=40)
+        if rag_results:
+            for r in rag_results:
+                r["fit_score"] = calculate_fit_score(r, skills, user_city)
+            rag_results.sort(key=lambda x: -x["fit_score"]["score"])
+            matched_list = rag_results
+    except Exception:
+        pass
+
+    if not matched_list:
+        skills_low = [s.lower() for s in skills]
+        for c in COMPANIES:
+            sc = score_company(c, skills_low)
+            if sc > 0 or c["category"] in ("AI / ML", "Software Development"):
+                c_copy = dict(c)
+                c_copy["score"] = sc
+                c_copy["fit_score"] = calculate_fit_score(c_copy, skills, user_city)
+                matched_list.append(c_copy)
+        matched_list.sort(key=lambda x: -x["fit_score"]["score"])
+
+    targets = matched_list[:req.num_companies]
+    if not targets:
+        raise HTTPException(400, "Could not find any matching companies for your profile stack.")
+
+    now = time.time()
+    params_str = json.dumps({"target_role": req.target_role, "num_companies": req.num_companies, "tone": req.tone})
+    
+    with _db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO autopilot_runs (user_id, status, params, summary, created_at) VALUES (?, ?, ?, ?, ?)",
+            (user["id"], "pending_approval", params_str, "{}", now)
+        )
+        run_id = cursor.lastrowid
+
+        drafts = []
+        for c in targets:
+            to_email = c["emails"][0] if c["emails"] else ""
+            fit = c.get("fit_score", {}).get("score", 0)
+            skills_str = ", ".join(skills[:6]) if skills else "software development"
+            
+            # Generate email
+            subject = f"Application for {req.target_role} — {profile.get('name', 'Experienced Developer')}"
+            body = (f"Dear Hiring Team at {c['name']},\n\n"
+                    f"I am writing to express my interest in the {req.target_role} position. "
+                    f"With expertise in {skills_str}, I believe I can contribute build quality solutions to your team.\n\n"
+                    f"Please find my resume attached. I would love to connect to discuss further.\n\n"
+                    f"Best regards,\n{profile.get('name', 'Applicant')}\n{profile.get('email', '')}")
+
+            if llm_enabled():
+                try:
+                    prompt = (
+                        f"Write a short cold job-application email ({req.tone} tone, max 120 words).\n"
+                        f"From: {profile.get('name', 'Applicant')} ({profile.get('email', '')})\n"
+                        f"To: {c['name']}\n"
+                        f"Role: {req.target_role} | Skills: {skills_str}\n\n"
+                        f"Return ONLY JSON: {{\"subject\":\"...\",\"body\":\"...\"}}"
+                    )
+                    data = _parse_json(llm_complete(prompt, system="Professional job coach. Return JSON.", temperature=0.5, max_tokens=300))
+                    if data and data.get("subject") and data.get("body"):
+                        subject = data["subject"]
+                        body = data["body"]
+                except Exception:
+                    pass
+
+            cursor.execute(
+                """INSERT INTO autopilot_drafts 
+                   (run_id, company_id, custom_company_name, email_to, subject, body, status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (run_id, c["id"], "", to_email, subject, body, "pending")
+            )
+            draft_id = cursor.lastrowid
+            drafts.append({
+                "id": draft_id,
+                "company_id": c["id"],
+                "company_name": c["name"],
+                "email_to": to_email,
+                "subject": subject,
+                "body": body,
+                "fit_score": fit
+            })
+        conn.commit()
+
+    return {
+        "success": True,
+        "run_id": run_id,
+        "status": "pending_approval",
+        "drafts": drafts
+    }
+
+
+@app.get("/api/autopilot/{run_id}")
+def api_autopilot_detail(run_id: int, request: Request):
+    auth_header = request.headers.get("Authorization")
+    if not auth_header:
+        raise HTTPException(401, "Missing Authorization Header")
+    user = _auth(auth_header)
+    if not user:
+        raise HTTPException(401, "Invalid session")
+
+    with _db() as conn:
+        run = conn.execute("SELECT * FROM autopilot_runs WHERE id = ? AND user_id = ?", (run_id, user["id"])).fetchone()
+        if not run:
+            raise HTTPException(404, "Autopilot run not found")
+        run_dict = dict(run)
+
+        draft_rows = conn.execute("SELECT * FROM autopilot_drafts WHERE run_id = ?", (run_id,)).fetchall()
+
+    drafts = []
+    for r in draft_rows:
+        d = dict(r)
+        comp = COMPANIES[d["company_id"]] if 0 <= d["company_id"] < len(COMPANIES) else {}
+        d["company_name"] = comp.get("name", "Unknown")
+        drafts.append(d)
+
+    return {
+        "success": True,
+        "run": run_dict,
+        "drafts": drafts
+    }
+
+
+@app.post("/api/autopilot/{run_id}/approve")
+async def api_autopilot_approve(run_id: int, req: AutopilotApproveRequest, request: Request):
+    auth_header = request.headers.get("Authorization")
+    if not auth_header:
+        raise HTTPException(401, "Missing Authorization Header")
+    user = _auth(auth_header)
+    if not user:
+        raise HTTPException(401, "Invalid session")
+
+    resend_key = os.getenv("RESEND_API_KEY", "")
+    sent_count = 0
+    errors = []
+
+    with _db() as conn:
+        cursor = conn.cursor()
+        run = cursor.execute("SELECT id FROM autopilot_runs WHERE id = ? AND user_id = ?", (run_id, user["id"])).fetchone()
+        if not run:
+            raise HTTPException(404, "Autopilot run not found")
+
+        # 1. Handle rejections
+        if req.rejected_drafts:
+            placeholders = ",".join("?" for _ in req.rejected_drafts)
+            cursor.execute(
+                f"UPDATE autopilot_drafts SET status = 'rejected' WHERE run_id = ? AND id IN ({placeholders})",
+                [run_id] + req.rejected_drafts
+            )
+
+        # 2. Handle approvals
+        for d_id in req.approved_drafts:
+            draft = cursor.execute(
+                "SELECT * FROM autopilot_drafts WHERE id = ? AND run_id = ? AND status = 'pending'",
+                (d_id, run_id)
+            ).fetchone()
+            if not draft:
+                continue
+            
+            d = dict(draft)
+            recipient = d["email_to"]
+            subject = d["subject"]
+            body = d["body"]
+            comp_id = d["company_id"]
+
+            # Try to dispatch email via Resend
+            sent_ok = False
+            if resend_key and recipient:
+                try:
+                    r = httpx.post("https://api.resend.com/emails",
+                        headers={"Authorization": f"Bearer {resend_key}", "Content-Type": "application/json"},
+                        json={"from": "Comonk AI <onboarding@resend.dev>", "to": [recipient],
+                              "subject": subject, "text": body}, timeout=10)
+                    sent_ok = (r.status_code == 200)
+                except Exception as e:
+                    errors.append(f"Email error for draft {d_id}: {str(e)}")
+            else:
+                sent_ok = True
+
+            cursor.execute(
+                "UPDATE autopilot_drafts SET status = ? WHERE id = ?",
+                ("approved" if sent_ok else "failed", d_id)
+            )
+
+            if sent_ok:
+                sent_count += 1
+                now = time.time()
+                existing_app = cursor.execute(
+                    "SELECT id FROM applications WHERE user_id = ? AND company_id = ?",
+                    (user["id"], comp_id)
+                ).fetchone()
+
+                if existing_app:
+                    app_id = existing_app[0]
+                    cursor.execute(
+                        "UPDATE applications SET status = 'applied', last_action_at = ?, email_to = ?, subject = ? WHERE id = ?",
+                        (now, recipient, subject, app_id)
+                    )
+                    cursor.execute(
+                        "INSERT INTO application_events (application_id, type, detail) VALUES (?, 'sent', ?)",
+                        (app_id, f"Autopilot sent outreach: '{subject}' to {recipient}")
+                    )
+                else:
+                    cursor.execute(
+                        """INSERT INTO applications 
+                           (user_id, company_id, status, applied_at, last_action_at, email_to, subject)
+                           VALUES (?, ?, 'applied', ?, ?, ?, ?)""",
+                        (user["id"], comp_id, now, now, recipient, subject)
+                    )
+                    app_id = cursor.lastrowid
+                    cursor.execute(
+                        "INSERT INTO application_events (application_id, type, detail) VALUES (?, 'sent', ?)",
+                        (app_id, f"Autopilot sent outreach: '{subject}' to {recipient}")
+                    )
+
+        # 3. Check if all drafts of this run are processed
+        remaining = cursor.execute(
+            "SELECT COUNT(id) FROM autopilot_drafts WHERE run_id = ? AND status = 'pending'",
+            (run_id,)
+        ).fetchone()[0]
+
+        new_status = "completed" if remaining == 0 else "pending_approval"
+        summary_str = json.dumps({"sent": sent_count, "errors": errors, "rejected": len(req.rejected_drafts)})
+        
+        cursor.execute(
+            "UPDATE autopilot_runs SET status = ?, summary = ? WHERE id = ?",
+            (new_status, summary_str, run_id)
+        )
+        conn.commit()
+
+    return {
+        "success": True,
+        "sent_count": sent_count,
+        "errors": errors,
+        "remaining_pending": remaining,
+        "status": new_status
+    }
+
+
+@app.get("/api/autopilot/history")
+def api_autopilot_history(request: Request):
+    auth_header = request.headers.get("Authorization")
+    if not auth_header:
+        raise HTTPException(401, "Missing Authorization Header")
+    user = _auth(auth_header)
+    if not user:
+        raise HTTPException(401, "Invalid session")
+
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM autopilot_runs WHERE user_id = ? ORDER BY created_at DESC",
+            (user["id"],)
+        ).fetchall()
+
+    return {"success": True, "runs": [dict(r) for r in rows]}
 
 @app.get("/api/companies/{company_id}")
 def api_company_detail(company_id: int):

@@ -129,6 +129,7 @@ function openPanel(id) {
   if (id === 'livejobs' && S.allJobs.length === 0) loadJobs();
   if (id === 'learning') loadLearning(S.learnTab);
   if (id === 'tracker') loadKanban();
+  if (id === 'autopilot') loadAutopilot();
   if (id === 'roadmap') loadRoadmapShCards();
   if (id === 'trending') initTrendingPanel();
   if (id === 'stackoverflow') initSOPanel();
@@ -351,6 +352,7 @@ function initApp() {
 
   // Trackers
   loadKanban();
+  initAutopilot();
 
   // Live jobs
   loadJobs();
@@ -573,7 +575,8 @@ function openCompanyModal(id) {
       ` : ''}
     </div>`,
     `<button class="btn-primary" onclick="draftEmail(${id});closeModal()"><i class="fas fa-envelope"></i> Draft Email</button>
-     <button class="btn-ghost" onclick="quickAddApp(${id});closeModal()"><i class="fas fa-plus"></i> Track Application</button>`
+     <button class="btn-ghost" onclick="quickAddApp(${id});closeModal()"><i class="fas fa-plus"></i> Track Application</button>
+     <button class="btn-ghost" onclick="findReferralRecruiter(${id})" style="color:var(--c-purple-l)"><i class="fab fa-linkedin"></i> Find Referral</button>`
   );
 }
 
@@ -949,6 +952,217 @@ async function confirmAddApp() {
     toast(`${company} added to tracker`, 'success');
   }
 }
+
+/* ── Job-Hunt Autopilot & Referral Finder ───────────────────── */
+let autopilotState = { currentRun: null, drafts: [] };
+
+function initAutopilot() {
+  const range = $('ap-count');
+  if (range) {
+    range.addEventListener('input', () => { $('ap-count-val').textContent = range.value; });
+  }
+  const runBtn = $('ap-run-btn');
+  if (runBtn) {
+    runBtn.addEventListener('click', startAutopilotRun);
+  }
+}
+
+async function loadAutopilot() {
+  if (!Auth.isLoggedIn()) {
+    toast('Please log in to use Autopilot Agent', 'warning');
+    openAuthModal();
+    return;
+  }
+  
+  if (S.profile && S.profile.target_roles && S.profile.target_roles.length) {
+    $('ap-role').value = S.profile.target_roles[0];
+  }
+  
+  apGetHistory();
+}
+
+async function apGetHistory() {
+  try {
+    const res = await api('GET', '/api/autopilot/history');
+    if (res.success && res.runs) {
+      const tbody = $('ap-history-tbody');
+      if (res.runs.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;padding:20px;color:var(--text-3)">No runs registered yet</td></tr>`;
+      } else {
+        tbody.innerHTML = res.runs.map(run => {
+          const params = JSON.parse(run.params || '{}');
+          const summary = JSON.parse(run.summary || '{}');
+          const dateStr = new Date(run.created_at * 1000).toLocaleString();
+          let outcome = '—';
+          if (run.status === 'completed') {
+            outcome = `Sent: ${summary.sent || 0} | Rejected: ${summary.rejected || 0}`;
+          }
+          return `
+            <tr style="border-bottom:1px solid var(--border)">
+              <td style="padding:12px 0;color:var(--text-2)">${dateStr}</td>
+              <td style="color:var(--text)">${escHtml(params.target_role || '')}</td>
+              <td><span class="badge ${run.status === 'completed' ? 'green' : 'purple'}">${run.status}</span></td>
+              <td style="color:var(--text-2)">${outcome}</td>
+            </tr>
+          `;
+        }).join('');
+      }
+    }
+  } catch (e) {
+    console.error("Failed to load autopilot history: " + e.message);
+  }
+}
+
+async function startAutopilotRun() {
+  const role = $('ap-role').value.trim();
+  if (!role) { toast('Target role is required', 'error'); return; }
+  const count = parseInt($('ap-count').value);
+  const tone = $('ap-tone').value;
+
+  const btn = $('ap-run-btn');
+  btn.disabled = true;
+  btn.innerHTML = '<div class="parse-spinner" style="width:14px;height:14px;margin:0 5px 0 0;display:inline-block;vertical-align:middle"></div> Generating drafts...';
+
+  try {
+    const res = await api('POST', '/api/autopilot/run', { target_role: role, num_companies: count, tone: tone });
+    if (res.success) {
+      autopilotState.currentRun = res.run_id;
+      autopilotState.drafts = res.drafts;
+      renderAutopilotQueue();
+      $('ap-status-badge').textContent = 'Awaiting Approval';
+      toast('Autopilot generated outreach drafts!', 'success');
+    } else {
+      toast(res.error || 'Failed to start autopilot run', 'error');
+    }
+  } catch (e) {
+    toast(e.message || 'Connection error', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '<i class="fas fa-play"></i> Start Autopilot Run';
+  }
+}
+
+function renderAutopilotQueue() {
+  const container = $('ap-queue-container');
+  if (autopilotState.drafts.length === 0) {
+    container.innerHTML = `
+      <div class="empty-state">
+        <i class="fas fa-check-circle" style="font-size:48px;color:var(--c-green)"></i>
+        <p>All drafts processed for this run.</p>
+      </div>`;
+    $('ap-status-badge').textContent = 'Completed';
+    apGetHistory();
+    return;
+  }
+
+  container.innerHTML = autopilotState.drafts.map(d => {
+    return `
+      <div class="card" id="ap-draft-card-${d.id}" style="border-left: 4px solid var(--c-purple);padding:14px;background:var(--bg-3);margin-bottom:12px">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px">
+          <div>
+            <h5 style="font-weight:bold;font-size:14px;color:var(--text)">${escHtml(d.company_name)}</h5>
+            <span class="badge blue" style="font-size:10px;margin-top:4px"><i class="fas fa-bullseye"></i> Fit Score: ${d.fit_score}%</span>
+          </div>
+          <div style="display:flex;gap:6px">
+            <button class="btn-xs primary" onclick="approveDraft(${d.id})" style="background:var(--c-green);color:white"><i class="fas fa-check"></i> Send</button>
+            <button class="btn-xs ghost" onclick="rejectDraft(${d.id})" style="color:var(--c-red);border-color:rgba(239,68,68,0.3)"><i class="fas fa-times"></i> Discard</button>
+          </div>
+        </div>
+        <div class="fg" style="margin-bottom:8px">
+          <label style="font-size:10px">Subject</label>
+          <input class="inp" value="${escHtml(d.subject)}" id="ap-subj-${d.id}" style="font-size:12px;padding:6px 10px;background:var(--bg-2)">
+        </div>
+        <div class="fg">
+          <label style="font-size:10px">Body</label>
+          <textarea class="inp" rows="4" id="ap-body-${d.id}" style="font-size:12px;padding:8px 10px;background:var(--bg-2);line-height:1.5">${escHtml(d.body)}</textarea>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+async function approveDraft(draftId) {
+  const subj = $(`ap-subj-${draftId}`).value.trim();
+  const body = $(`ap-body-${draftId}`).value.trim();
+  if (!subj || !body) { toast('Subject and Body cannot be empty', 'error'); return; }
+
+  const d = autopilotState.drafts.find(x => x.id === draftId);
+  if (d) { d.subject = subj; d.body = body; }
+
+  try {
+    const res = await api('POST', `/api/autopilot/${autopilotState.currentRun}/approve`, {
+      approved_drafts: [draftId],
+      rejected_drafts: []
+    });
+    if (res.success) {
+      toast('Email sent and logged to Tracker!', 'success');
+      autopilotState.drafts = autopilotState.drafts.filter(x => x.id !== draftId);
+      renderAutopilotQueue();
+    }
+  } catch (e) {
+    toast('Approval failed: ' + e.message, 'error');
+  }
+}
+
+async function rejectDraft(draftId) {
+  try {
+    const res = await api('POST', `/api/autopilot/${autopilotState.currentRun}/approve`, {
+      approved_drafts: [],
+      rejected_drafts: [draftId]
+    });
+    if (res.success) {
+      toast('Draft discarded', 'info');
+      autopilotState.drafts = autopilotState.drafts.filter(x => x.id !== draftId);
+      renderAutopilotQueue();
+    }
+  } catch (e) {
+    toast('Discard failed: ' + e.message, 'error');
+  }
+}
+
+async function findReferralRecruiter(companyId) {
+  if (!Auth.isLoggedIn()) {
+    toast('Please log in to query referral contacts', 'warning');
+    openAuthModal();
+    return;
+  }
+  toast('Searching database for recruiter...', 'info');
+  try {
+    const res = await api('GET', `/api/referrals/${companyId}`);
+    if (res.success && res.recruiter) {
+      const rec = res.recruiter;
+      openModal(`Referral Recruiter for Company`, `
+        <div style="display:flex;flex-direction:column;gap:12px">
+          <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px">
+            <div class="su-avatar" style="width:48px;height:48px;font-size:18px;background:var(--c-purple);color:white;display:flex;align-items:center;justify-content:center;border-radius:50%">${escHtml(rec.name[0])}</div>
+            <div>
+              <h4 style="font-weight:bold;font-size:15px;color:var(--text)">${escHtml(rec.name)}</h4>
+              <span class="badge purple" style="font-size:10px">${escHtml(rec.category)}</span>
+            </div>
+          </div>
+          <div class="prof-row"><span class="pr-lbl">Location</span><span>${escHtml(rec.city)}</span></div>
+          <div class="prof-row"><span class="pr-lbl">LinkedIn</span><span><a href="${escHtml(rec.linkedin)}" target="_blank" style="color:var(--c-blue-l);text-decoration:underline"><i class="fab fa-linkedin"></i> View HR Profile</a></span></div>
+          
+          <div class="fg" style="margin-top:10px">
+            <label style="font-size:11px;font-weight:bold;color:var(--c-purple-l)">Suggested Connection Request Message</label>
+            <textarea class="inp ta-md" id="referral-intro-text" style="font-size:12px;line-height:1.5">${escHtml(res.suggested_message)}</textarea>
+          </div>
+        </div>
+      `, `
+        <button class="btn-primary" onclick="navigator.clipboard.writeText($('referral-intro-text').value);toast('Message copied to clipboard!','success')"><i class="fas fa-copy"></i> Copy Message</button>
+        <button class="btn-ghost" onclick="closeModal()">Close</button>
+      `);
+    } else {
+      toast(res.error || 'No recruiters found', 'error');
+    }
+  } catch (e) {
+    toast('Referral search failed: ' + e.message, 'error');
+  }
+}
+
+window.approveDraft = approveDraft;
+window.rejectDraft = rejectDraft;
+window.findReferralRecruiter = findReferralRecruiter;
 
 /* ── Mock Interview ──────────────────────────────────────────── */
 function initInterview() {
