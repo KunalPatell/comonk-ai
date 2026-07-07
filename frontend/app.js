@@ -144,6 +144,10 @@ function openPanel(id) {
   if (id === 'mockvoice') initMockVoice();
   if (id === 'resumestudio') initResumeStudio();
   if (id === 'calendar') initCalendar();
+  // Enterprise panels
+  if (id === 'briefing') loadDailyBriefing();
+  if (id === 'outreach') loadOutreachAnalytics();
+  if (id === 'offers' && !$('offers-grid').children.length) addOfferSlot();
   trackActivity();
   if (id === 'cheatsheets') {
     if ($('cs-categories').children.length === 0) loadCheatSheetTopics();
@@ -667,7 +671,8 @@ function openCompanyModal(id) {
     </div>`,
     `<button class="btn-primary" onclick="draftEmail(${id});closeModal()"><i class="fas fa-envelope"></i> Draft Email</button>
      <button class="btn-ghost" onclick="quickAddApp(${id});closeModal()"><i class="fas fa-plus"></i> Track Application</button>
-     <button class="btn-ghost" onclick="findReferralRecruiter(${id})" style="color:var(--c-purple-l)"><i class="fab fa-linkedin"></i> Find Referral</button>`
+     <button class="btn-ghost" onclick="findReferralRecruiter(${id})" style="color:var(--c-purple-l)"><i class="fab fa-linkedin"></i> Find Referral</button>
+     <button class="btn-ghost" onclick="closeModal();setTimeout(()=>loadCompanyIntel(${id}),100)" style="color:var(--c-blue-l)"><i class="fas fa-brain"></i> Company Intel</button>`
   );
 }
 
@@ -4908,3 +4913,462 @@ function calDeleteEvent(){
   calSave(calEvents().filter(x=>x.id!==id)); closeCalModal(); renderCalendar(); toast('Event deleted','warn');
 }
 
+/* ═══════════════════════════════════════════════════════════════════
+   ENTERPRISE FEATURES — Phase 3
+   ══════════════════════════════════════════════════════════════════ */
+
+/* ── Feature 1: Company Intelligence Deep Dive ──────────────────── */
+async function loadCompanyIntel(companyId) {
+  try {
+    const data = await api('GET', `/api/company-intel/${companyId}`);
+    const intel = data.intel || {};
+    const recruiters = data.recruiters || [];
+    const techBadges = (intel.tech_stack || []).map(t =>
+      `<span style="background:rgba(124,58,237,0.12);color:var(--c-purple-l);padding:3px 8px;border-radius:6px;font-size:11px;font-weight:600">${escHtml(t)}</span>`
+    ).join(' ');
+    const cultureBadges = (intel.culture_signals || []).map(s =>
+      `<span style="background:rgba(16,185,129,0.1);color:var(--c-green-l);padding:3px 8px;border-radius:6px;font-size:11px">${escHtml(s)}</span>`
+    ).join(' ');
+    const recRows = recruiters.length
+      ? recruiters.map(r => `
+          <div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border)">
+            <div style="width:32px;height:32px;border-radius:50%;background:linear-gradient(135deg,var(--c-purple),var(--c-blue));display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:bold;color:white;flex-shrink:0">${escHtml(initials(r.name))}</div>
+            <div style="flex:1;min-width:0">
+              <div style="font-weight:600;font-size:13px;color:white">${escHtml(r.name)}</div>
+              ${r.title ? `<div style="font-size:11px;color:var(--text-2)">${escHtml(r.title)}</div>` : ''}
+            </div>
+            ${r.linkedin_url ? `<a href="${escHtml(r.linkedin_url)}" target="_blank" class="btn-primary sm" style="flex-shrink:0;font-size:11px"><i class="fab fa-linkedin"></i> Connect</a>` : ''}
+          </div>`).join('')
+      : `<p class="muted" style="font-size:12px">No recruiters indexed for this company yet.</p>`;
+
+    openModal(`🏢 ${data.name} — Company Intel`, `
+      <div style="display:flex;flex-direction:column;gap:16px">
+        <div style="display:flex;gap:10px;flex-wrap:wrap">
+          ${intel.growth_stage ? `<span style="background:rgba(245,158,11,0.1);color:var(--c-gold-l);border:1px solid rgba(245,158,11,0.2);padding:4px 10px;border-radius:20px;font-size:11px;font-weight:700">${escHtml(intel.growth_stage)}</span>` : ''}
+          ${intel.work_mode ? `<span style="background:rgba(59,130,246,0.1);color:var(--c-blue-l);border:1px solid rgba(59,130,246,0.2);padding:4px 10px;border-radius:20px;font-size:11px;font-weight:700"><i class="fas fa-map-marker-alt"></i> ${escHtml(intel.work_mode)}</span>` : ''}
+          ${intel.founded && intel.founded !== 'Unknown' ? `<span style="background:var(--bg-3);padding:4px 10px;border-radius:20px;font-size:11px">Est. ${escHtml(intel.founded)}</span>` : ''}
+          ${intel.size ? `<span style="background:var(--bg-3);padding:4px 10px;border-radius:20px;font-size:11px"><i class="fas fa-users"></i> ${escHtml(intel.size)}</span>` : ''}
+        </div>
+        ${intel.why_apply ? `<div style="background:rgba(124,58,237,0.06);border:1px solid rgba(124,58,237,0.15);border-radius:10px;padding:12px;font-size:13px;color:var(--text-1)"><i class="fas fa-lightbulb" style="color:var(--c-gold)"></i> <strong>Why apply?</strong> ${escHtml(intel.why_apply)}</div>` : ''}
+        ${intel.recent_news ? `<div style="font-size:12px;color:var(--text-2)"><i class="fas fa-newspaper" style="color:var(--c-blue)"></i> ${escHtml(intel.recent_news)}</div>` : ''}
+        <div>
+          <div style="font-size:11px;font-weight:700;color:var(--text-2);margin-bottom:6px;text-transform:uppercase;letter-spacing:.05em">Tech Stack</div>
+          <div style="display:flex;flex-wrap:wrap;gap:6px">${techBadges || '<span class="muted" style="font-size:12px">Not available</span>'}</div>
+        </div>
+        <div>
+          <div style="font-size:11px;font-weight:700;color:var(--text-2);margin-bottom:6px;text-transform:uppercase;letter-spacing:.05em">Culture Signals</div>
+          <div style="display:flex;flex-wrap:wrap;gap:6px">${cultureBadges || '<span class="muted" style="font-size:12px">Not available</span>'}</div>
+        </div>
+        <div>
+          <div style="font-size:11px;font-weight:700;color:var(--text-2);margin-bottom:8px;text-transform:uppercase;letter-spacing:.05em">Top HR Contacts</div>
+          <div>${recRows}</div>
+        </div>
+      </div>
+    `, `<button class="btn-primary" onclick="closeModal()">Close</button>`);
+  } catch (e) {
+    toast('Could not load company intel: ' + e.message, 'error');
+  }
+}
+window.loadCompanyIntel = loadCompanyIntel;
+
+/* ── Feature 2: Daily Briefing Panel ────────────────────────────── */
+async function loadDailyBriefing() {
+  const body = $('briefing-body');
+  const dateEl = $('briefing-date');
+  if (!body) return;
+  if (!Auth.isLoggedIn()) {
+    body.innerHTML = `<div class="card" style="grid-column:1/-1;text-align:center;padding:40px">
+      <i class="fas fa-lock" style="font-size:40px;color:var(--c-purple);opacity:0.5"></i>
+      <p class="muted" style="margin-top:12px">Please log in to see your personalized daily briefing</p>
+      <button class="btn-primary" style="margin-top:12px" onclick="openAuthModal()">Login</button>
+    </div>`;
+    return;
+  }
+  body.innerHTML = `<div class="card" style="grid-column:1/-1"><div class="loading-spinner" style="margin:40px auto"></div></div>`;
+  try {
+    const d = await authApi('GET', '/api/daily-briefing');
+    if (dateEl) dateEl.textContent = `${d.weekday}, ${d.date}`;
+
+    const weekdayIcons = { Monday:'🌅', Tuesday:'🚀', Wednesday:'⚡', Thursday:'🎯', Friday:'🔥', Saturday:'☀️', Sunday:'🌟' };
+    const wIcon = weekdayIcons[d.weekday] || '🌞';
+    const statsCards = [
+      { label: 'Total Applications', val: d.stats.total, icon: 'fa-file-alt', color: 'var(--c-purple)' },
+      { label: 'Interview Calls', val: d.stats.interviews, icon: 'fa-handshake', color: 'var(--c-blue)' },
+      { label: 'Positive Replies', val: d.stats.replies, icon: 'fa-reply', color: 'var(--c-green)' },
+      { label: 'Offers Received', val: d.stats.offers, icon: 'fa-trophy', color: 'var(--c-gold)' },
+    ];
+
+    const priorityItems = (d.priorities || []).map(p =>
+      `<li style="display:flex;gap:10px;align-items:flex-start;padding:8px 0;border-bottom:1px solid var(--border)">
+        <i class="fas fa-chevron-right" style="color:var(--c-purple);margin-top:3px;flex-shrink:0"></i>
+        <span style="font-size:13px;color:var(--text-1)">${escHtml(p)}</span>
+      </li>`
+    ).join('');
+
+    const followupItems = (d.followups_due || []).length
+      ? d.followups_due.map(f =>
+          `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border)">
+            <span style="font-size:13px;font-weight:600;color:var(--text-1)">${escHtml(f.company)}</span>
+            <span style="font-size:11px;color:var(--c-gold-l);background:rgba(245,158,11,0.1);padding:2px 8px;border-radius:10px">${f.days_since}d overdue</span>
+          </div>`
+        ).join('')
+      : `<p class="muted" style="font-size:12px;padding:12px 0">No overdue follow-ups! 🎉 Keep it up.</p>`;
+
+    body.innerHTML = `
+      <!-- AI greeting -->
+      <div class="card" style="grid-column:1/-1;background:linear-gradient(135deg,rgba(124,58,237,0.12),rgba(59,130,246,0.08));border:1px solid rgba(124,58,237,0.2)">
+        <div style="font-size:28px;margin-bottom:8px">${wIcon}</div>
+        <div style="font-size:14px;color:var(--text-1);line-height:1.6">${d.ai_insight ? escHtml(d.ai_insight) : escHtml(d.motivation)}</div>
+      </div>
+
+      <!-- Stats row -->
+      ${statsCards.map(s => `
+        <div class="card" style="display:flex;align-items:center;gap:14px;padding:16px">
+          <div style="width:44px;height:44px;border-radius:12px;background:${s.color}22;display:flex;align-items:center;justify-content:center;flex-shrink:0">
+            <i class="fas ${s.icon}" style="font-size:18px;color:${s.color}"></i>
+          </div>
+          <div>
+            <div style="font-size:24px;font-weight:900;color:white">${s.val}</div>
+            <div style="font-size:11px;color:var(--text-2);margin-top:2px">${s.label}</div>
+          </div>
+        </div>`).join('')}
+
+      <!-- Today's priorities -->
+      <div class="card" style="grid-column:1/-1">
+        <div style="font-size:13px;font-weight:700;color:white;margin-bottom:10px"><i class="fas fa-tasks" style="color:var(--c-purple)"></i> Today's Priority Actions</div>
+        <ul style="list-style:none;padding:0;margin:0">${priorityItems}</ul>
+      </div>
+
+      <!-- Follow-ups due -->
+      <div class="card">
+        <div style="font-size:13px;font-weight:700;color:white;margin-bottom:10px"><i class="fas fa-bell" style="color:var(--c-gold)"></i> Follow-Ups Due</div>
+        <div>${followupItems}</div>
+        ${d.followups_due.length ? `<button class="btn-primary sm" style="margin-top:10px;width:100%" onclick="openPanel('tracker')">Go to App Tracker</button>` : ''}
+      </div>
+
+      <!-- Skill of the day -->
+      <div class="card" style="background:linear-gradient(135deg,rgba(16,185,129,0.08),rgba(59,130,246,0.05));border:1px solid rgba(16,185,129,0.15)">
+        <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--c-green-l);margin-bottom:6px">Skill of the Day</div>
+        <div style="font-size:15px;font-weight:800;color:white;margin-bottom:6px">${escHtml(d.skill_of_day.skill)}</div>
+        <div style="font-size:12px;color:var(--text-2);line-height:1.5">${escHtml(d.skill_of_day.tip)}</div>
+      </div>
+    `;
+  } catch (e) {
+    body.innerHTML = `<div class="card" style="grid-column:1/-1"><p class="muted">Could not load briefing: ${escHtml(e.message)}</p></div>`;
+  }
+}
+window.loadDailyBriefing = loadDailyBriefing;
+
+/* ── Feature 3: Outreach Analytics Dashboard ────────────────────── */
+async function loadOutreachAnalytics() {
+  const body = $('outreach-body');
+  if (!body) return;
+  if (!Auth.isLoggedIn()) {
+    body.innerHTML = `<div class="card" style="grid-column:1/-1;text-align:center;padding:40px">
+      <i class="fas fa-lock" style="font-size:40px;color:var(--c-purple);opacity:0.5"></i>
+      <p class="muted" style="margin-top:12px">Please log in to view your outreach analytics</p>
+      <button class="btn-primary" style="margin-top:12px" onclick="openAuthModal()">Login</button>
+    </div>`;
+    return;
+  }
+  body.innerHTML = `<div class="card"><div class="loading-spinner" style="margin:40px auto"></div></div>`;
+  try {
+    const d = await authApi('GET', '/api/analytics/outreach');
+    const f = d.funnel;
+    const maxFunnel = f.total || 1;
+
+    // Funnel bars
+    const funnelSteps = [
+      { label: 'Saved / Discovered', val: f.total, color: 'var(--c-purple)', icon: 'fa-bookmark' },
+      { label: 'Applied / Emailed', val: f.applied, color: 'var(--c-blue)', icon: 'fa-paper-plane' },
+      { label: 'Replied', val: f.replied, color: 'var(--c-teal)', icon: 'fa-reply' },
+      { label: 'Interview', val: f.interview, color: 'var(--c-gold)', icon: 'fa-handshake' },
+      { label: 'Offer', val: f.offer, color: 'var(--c-green)', icon: 'fa-trophy' },
+    ];
+    const funnelHtml = funnelSteps.map(step => {
+      const pct = maxFunnel ? Math.max(3, Math.round((step.val / maxFunnel) * 100)) : 3;
+      return `<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+        <i class="fas ${step.icon}" style="width:16px;color:${step.color}"></i>
+        <div style="flex:1">
+          <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:3px">
+            <span style="color:var(--text-2);font-weight:600">${step.label}</span>
+            <span style="color:white;font-weight:bold">${step.val}</span>
+          </div>
+          <div style="height:8px;background:var(--bg-3);border-radius:4px;overflow:hidden">
+            <div style="height:100%;width:${pct}%;background:${step.color};border-radius:4px;transition:width .8s ease"></div>
+          </div>
+        </div>
+      </div>`;
+    }).join('');
+
+    // Weekly chart bars
+    const maxW = Math.max(...d.weekly_chart.map(w => w.count), 1);
+    const weeklyHtml = d.weekly_chart.map(w => {
+      const h = maxW ? Math.max(4, Math.round((w.count / maxW) * 80)) : 4;
+      return `<div style="display:flex;flex-direction:column;align-items:center;gap:4px">
+        <span style="font-size:11px;font-weight:bold;color:var(--text-2)">${w.count || ''}</span>
+        <div style="width:28px;height:${h}px;background:var(--c-purple);border-radius:4px 4px 0 0;min-height:4px"></div>
+        <span style="font-size:10px;color:var(--text-2)">${w.day}</span>
+      </div>`;
+    }).join('');
+
+    // Top categories
+    const catHtml = (d.top_categories || []).map((c, i) => {
+      const colors = ['var(--c-purple)', 'var(--c-blue)', 'var(--c-green)', 'var(--c-gold)', 'var(--c-teal)'];
+      return `<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--border)">
+        <div style="display:flex;align-items:center;gap:8px">
+          <div style="width:8px;height:8px;border-radius:50%;background:${colors[i]}"></div>
+          <span style="font-size:12px;color:var(--text-1)">${escHtml(c.category)}</span>
+        </div>
+        <span style="font-size:12px;font-weight:bold;color:white">${c.count}</span>
+      </div>`;
+    }).join('');
+
+    body.innerHTML = `
+      <!-- KPI row -->
+      <div class="card" style="display:flex;flex-direction:column;gap:14px">
+        <div style="font-size:13px;font-weight:700;color:white"><i class="fas fa-fire" style="color:var(--c-gold)"></i> Hunt Stats</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+          <div style="text-align:center;padding:10px;background:var(--bg-3);border-radius:10px">
+            <div style="font-size:28px;font-weight:900;color:var(--c-purple)">${d.streak_days}</div>
+            <div style="font-size:10px;color:var(--text-2)">Day Streak 🔥</div>
+          </div>
+          <div style="text-align:center;padding:10px;background:var(--bg-3);border-radius:10px">
+            <div style="font-size:28px;font-weight:900;color:var(--c-blue)">${d.conversion_rate}%</div>
+            <div style="font-size:10px;color:var(--text-2)">Reply Rate</div>
+          </div>
+          <div style="text-align:center;padding:10px;background:var(--bg-3);border-radius:10px">
+            <div style="font-size:28px;font-weight:900;color:var(--c-green)">${d.avg_response_days !== null ? d.avg_response_days + 'd' : '—'}</div>
+            <div style="font-size:10px;color:var(--text-2)">Avg. Response</div>
+          </div>
+          <div style="text-align:center;padding:10px;background:var(--bg-3);border-radius:10px">
+            <div style="font-size:28px;font-weight:900;color:var(--c-gold)">${d.avg_fit_score !== null ? d.avg_fit_score + '%' : '—'}</div>
+            <div style="font-size:10px;color:var(--text-2)">Avg. Fit Score</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Funnel -->
+      <div class="card">
+        <div style="font-size:13px;font-weight:700;color:white;margin-bottom:14px"><i class="fas fa-chart-funnel" style="color:var(--c-purple)"></i> Conversion Funnel</div>
+        ${funnelHtml}
+        ${f.rejected ? `<div style="font-size:11px;color:var(--text-2);margin-top:6px"><i class="fas fa-times-circle" style="color:#ef4444"></i> ${f.rejected} rejected</div>` : ''}
+      </div>
+
+      <!-- Weekly activity -->
+      <div class="card">
+        <div style="font-size:13px;font-weight:700;color:white;margin-bottom:14px"><i class="fas fa-chart-bar" style="color:var(--c-blue)"></i> This Week's Activity</div>
+        <div style="display:flex;justify-content:space-around;align-items:flex-end;height:90px;padding-top:10px">${weeklyHtml}</div>
+      </div>
+
+      <!-- Top categories -->
+      <div class="card">
+        <div style="font-size:13px;font-weight:700;color:white;margin-bottom:12px"><i class="fas fa-tag" style="color:var(--c-gold)"></i> Top Sectors Applied</div>
+        ${catHtml || '<p class="muted" style="font-size:12px">Apply to companies to see sector breakdown.</p>'}
+      </div>
+    `;
+  } catch (e) {
+    body.innerHTML = `<div class="card"><p class="muted">Could not load analytics: ${escHtml(e.message)}</p></div>`;
+  }
+}
+window.loadOutreachAnalytics = loadOutreachAnalytics;
+
+/* ── Feature 4: Cold Email Scorer ───────────────────────────────── */
+async function scoreEmail() {
+  const text = ($('email-scorer-text') || {}).value?.trim();
+  const company = ($('email-scorer-company') || {}).value?.trim();
+  const recipient = ($('email-scorer-recipient') || {}).value?.trim();
+  const btn = $('score-email-btn');
+  const results = $('email-score-results');
+  if (!text || text.length < 30) { toast('Please write at least 30 characters', 'warning'); return; }
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Scoring...'; }
+  results.innerHTML = '<div class="loading-spinner" style="margin:40px auto"></div>';
+  try {
+    const d = await api('POST', '/api/score-email', { text, company_name: company || '', recipient_name: recipient || '' });
+    const overall = d.overall_score || 0;
+    const scoreColor = overall >= 80 ? 'var(--c-green)' : overall >= 60 ? 'var(--c-gold)' : 'var(--c-red, #ef4444)';
+    const scoreLabel = overall >= 80 ? 'Excellent' : overall >= 65 ? 'Good' : overall >= 50 ? 'Average' : 'Needs Work';
+    const dims = [
+      { label: 'Personalization', score: d.personalization_score, feedback: d.personalization_feedback, color: 'var(--c-purple)' },
+      { label: 'Clarity', score: d.clarity_score, feedback: d.clarity_feedback, color: 'var(--c-blue)' },
+      { label: 'Call-to-Action', score: d.cta_score, feedback: d.cta_feedback, color: 'var(--c-green)' },
+      { label: 'Tone', score: d.tone_score, feedback: d.tone_feedback, color: 'var(--c-gold)' },
+    ];
+    const dimHtml = dims.map(dim => `
+      <div style="margin-bottom:10px">
+        <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:3px">
+          <span style="font-weight:600;color:var(--text-2)">${dim.label}</span>
+          <span style="font-weight:bold;color:white">${dim.score}/100</span>
+        </div>
+        <div style="height:6px;background:var(--bg-3);border-radius:3px;overflow:hidden;margin-bottom:4px">
+          <div style="height:100%;width:${dim.score}%;background:${dim.color};border-radius:3px"></div>
+        </div>
+        <div style="font-size:11px;color:var(--text-2)">${escHtml(dim.feedback || '')}</div>
+      </div>`).join('');
+
+    results.innerHTML = `
+      <div style="text-align:center;padding:16px 0;border-bottom:1px solid var(--border)">
+        <div style="font-size:48px;font-weight:900;color:${scoreColor}">${overall}</div>
+        <div style="font-size:13px;font-weight:bold;color:${scoreColor}">${scoreLabel}</div>
+        <div style="font-size:11px;color:var(--text-2);margin-top:4px">Overall Email Score</div>
+      </div>
+
+      <div style="padding:12px 0">${dimHtml}</div>
+
+      <div style="padding:10px;background:var(--bg-3);border-radius:8px;margin-bottom:10px">
+        <div style="font-size:11px;font-weight:700;color:var(--c-green-l);margin-bottom:4px">✅ Strength</div>
+        <div style="font-size:12px;color:var(--text-1)">${escHtml(d.top_strength || '')}</div>
+      </div>
+      <div style="padding:10px;background:rgba(239,68,68,0.06);border:1px solid rgba(239,68,68,0.12);border-radius:8px;margin-bottom:10px">
+        <div style="font-size:11px;font-weight:700;color:#f87171;margin-bottom:4px">⚠️ Top Issue</div>
+        <div style="font-size:12px;color:var(--text-1)">${escHtml(d.top_weakness || '')}</div>
+      </div>
+
+      ${d.rewritten && d.rewritten !== text ? `
+        <div style="margin-top:4px">
+          <div style="font-size:11px;font-weight:700;color:var(--c-blue-l);margin-bottom:6px">✨ AI-Rewritten Version</div>
+          <div style="font-size:12px;background:var(--bg-3);padding:10px;border-radius:8px;white-space:pre-wrap;line-height:1.6;color:var(--text-1);max-height:160px;overflow-y:auto">${escHtml(d.rewritten)}</div>
+          <button class="btn-primary sm" style="margin-top:8px;width:100%" onclick="document.getElementById('email-scorer-text').value=${JSON.stringify(d.rewritten || '')};toast('Email replaced with AI version','success')"><i class='fas fa-magic'></i> Use AI Version</button>
+        </div>` : ''}
+    `;
+  } catch (e) {
+    results.innerHTML = `<div class="empty-state"><p class="muted">${escHtml(e.message)}</p></div>`;
+    toast(e.message, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-wand-magic-sparkles"></i> Score My Email'; }
+  }
+}
+window.scoreEmail = scoreEmail;
+
+/* ── Feature 5: Offer Comparator ─────────────────────────────────── */
+let _offerSlots = [];
+
+function addOfferSlot() {
+  if (_offerSlots.length >= 3) { toast('Maximum 3 offers can be compared', 'warning'); return; }
+  const idx = _offerSlots.length;
+  _offerSlots.push({});
+  renderOfferSlots();
+}
+window.addOfferSlot = addOfferSlot;
+
+function removeOfferSlot(idx) {
+  _offerSlots.splice(idx, 1);
+  renderOfferSlots();
+}
+window.removeOfferSlot = removeOfferSlot;
+
+function renderOfferSlots() {
+  const grid = $('offers-grid');
+  const addBtn = $('add-offer-btn');
+  const compareBtn = $('compare-btn');
+  const aiResult = $('offers-ai-result');
+  if (!grid) return;
+  if (aiResult) { aiResult.style.display = 'none'; aiResult.innerHTML = ''; }
+  if (addBtn) addBtn.style.display = _offerSlots.length >= 3 ? 'none' : '';
+  if (compareBtn) compareBtn.style.display = _offerSlots.length >= 1 ? '' : 'none';
+
+  const perksOptions = [
+    { id: 'health_insurance', label: '🏥 Health Insurance' },
+    { id: 'remote', label: '🏠 Remote Work' },
+    { id: 'hybrid', label: '🏢 Hybrid' },
+    { id: 'flexible_hours', label: '⏰ Flexible Hours' },
+    { id: 'meal', label: '🍱 Meal Benefits' },
+    { id: 'learning_budget', label: '📚 L&D Budget' },
+    { id: 'gym', label: '💪 Gym / Wellness' },
+    { id: 'stock', label: '📈 Stock / ESOP' },
+  ];
+
+  grid.innerHTML = _offerSlots.map((_, i) => `
+    <div class="card" style="position:relative;display:flex;flex-direction:column;gap:12px">
+      <button onclick="removeOfferSlot(${i})" style="position:absolute;top:12px;right:12px;background:none;border:none;cursor:pointer;color:var(--text-2)"><i class="fas fa-times"></i></button>
+      <div style="font-size:13px;font-weight:700;color:white">Offer ${i+1}</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+        <div><label class="form-label" style="font-size:11px">Company</label><input class="form-input" id="offer-company-${i}" placeholder="e.g. Infosys"></div>
+        <div><label class="form-label" style="font-size:11px">Role</label><input class="form-input" id="offer-role-${i}" placeholder="e.g. SDE-2"></div>
+        <div><label class="form-label" style="font-size:11px">CTC (LPA)</label><input class="form-input" id="offer-ctc-${i}" type="number" placeholder="12"></div>
+        <div><label class="form-label" style="font-size:11px">Annual Bonus (LPA)</label><input class="form-input" id="offer-bonus-${i}" type="number" placeholder="1"></div>
+        <div><label class="form-label" style="font-size:11px">ESOP Value (LPA)</label><input class="form-input" id="offer-esop-${i}" type="number" placeholder="0"></div>
+        <div><label class="form-label" style="font-size:11px">Company Type</label>
+          <select class="form-input" id="offer-type-${i}">
+            <option value="product">Product</option>
+            <option value="service">Service</option>
+            <option value="startup">Startup</option>
+            <option value="mnc">MNC</option>
+          </select>
+        </div>
+      </div>
+      <div>
+        <label class="form-label" style="font-size:11px">Perks & Benefits</label>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">${perksOptions.map(p =>
+          `<label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;color:var(--text-2)">
+            <input type="checkbox" id="offer-perk-${i}-${p.id}" value="${p.id}"> ${p.label}
+          </label>`).join('')}
+        </div>
+      </div>
+    </div>`).join('');
+}
+
+async function compareOffers() {
+  const btn = $('compare-btn');
+  const aiResult = $('offers-ai-result');
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Analyzing...'; }
+  const perksIds = ['health_insurance','remote','hybrid','flexible_hours','meal','learning_budget','gym','stock'];
+  const offers = _offerSlots.map((_, i) => ({
+    company: ($(`offer-company-${i}`) || {}).value || '',
+    role: ($(`offer-role-${i}`) || {}).value || '',
+    ctc: parseFloat(($(`offer-ctc-${i}`) || {}).value) || 0,
+    bonus: parseFloat(($(`offer-bonus-${i}`) || {}).value) || 0,
+    esop: parseFloat(($(`offer-esop-${i}`) || {}).value) || 0,
+    company_type: ($(`offer-type-${i}`) || {}).value || 'service',
+    perks: perksIds.filter(pid => ($(`offer-perk-${i}-${pid}`) || {}).checked),
+  }));
+
+  try {
+    const d = await api('POST', '/api/compare-offers', { offers });
+    const cols = d.offers.map((o, i) => {
+      const pick = d.ai_pick === (i + 1);
+      const ih = o.inhand || {};
+      return `
+        <div class="card" style="${pick ? 'border:2px solid var(--c-green);background:rgba(16,185,129,0.04)' : ''}position:relative;flex:1;min-width:220px">
+          ${pick ? `<div style="position:absolute;top:-10px;left:50%;transform:translateX(-50%);background:var(--c-green);color:#000;font-size:10px;font-weight:700;padding:2px 10px;border-radius:10px">⭐ AI PICK</div>` : ''}
+          <div style="font-size:14px;font-weight:800;color:white;margin-bottom:2px">${escHtml(o.company || 'Offer ' + (i+1))}</div>
+          <div style="font-size:11px;color:var(--text-2);margin-bottom:12px">${escHtml(o.role || '')}</div>
+          <div style="display:flex;flex-direction:column;gap:8px">
+            <div style="display:flex;justify-content:space-between;font-size:12px">
+              <span class="muted">CTC</span><span style="font-weight:bold;color:white">${o.ctc ? o.ctc.toFixed(1) + ' LPA' : '—'}</span>
+            </div>
+            <div style="display:flex;justify-content:space-between;font-size:12px">
+              <span class="muted">Monthly In-Hand</span><span style="font-weight:bold;color:var(--c-green)">₹${ih.monthly_inhand ? (ih.monthly_inhand/1000).toFixed(0) + 'K' : '—'}</span>
+            </div>
+            <div style="display:flex;justify-content:space-between;font-size:12px">
+              <span class="muted">Annual Tax (est.)</span><span style="font-weight:bold;color:var(--c-gold)">₹${ih.estimated_tax ? Math.round(ih.estimated_tax/1000) + 'K' : '—'}</span>
+            </div>
+            <div style="display:flex;justify-content:space-between;font-size:12px">
+              <span class="muted">Growth Potential</span>
+              <span style="font-weight:bold;color:${o.growth_score >= 80 ? 'var(--c-green)' : 'var(--c-gold)'}">${o.growth_score}/100</span>
+            </div>
+            <div style="display:flex;justify-content:space-between;font-size:12px">
+              <span class="muted">Perks Score</span>
+              <span style="font-weight:bold;color:var(--c-blue)">${o.perk_score}/100</span>
+            </div>
+          </div>
+        </div>`;
+    });
+
+    if (aiResult) {
+      aiResult.style.display = 'block';
+      aiResult.innerHTML = `
+        <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:16px">${cols.join('')}</div>
+        <div class="card" style="background:linear-gradient(135deg,rgba(16,185,129,0.08),rgba(59,130,246,0.05));border:1px solid rgba(16,185,129,0.2)">
+          <div style="font-size:13px;font-weight:700;color:white;margin-bottom:8px"><i class="fas fa-robot" style="color:var(--c-green)"></i> AI Recommendation</div>
+          <div style="font-size:13px;color:var(--text-1);line-height:1.6">${escHtml(d.ai_reason)}</div>
+        </div>`;
+    }
+    $('offers-grid').scrollIntoView({ behavior: 'smooth' });
+  } catch (e) {
+    toast('Compare failed: ' + e.message, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-scale-balanced"></i> Compare & Get AI Pick'; }
+  }
+}
+window.compareOffers = compareOffers;

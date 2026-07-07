@@ -284,11 +284,13 @@
     <nav class="sb-nav">
       <div class="sb-nav-label">WORKSPACE</div>
       <button class="sb-item active" data-panel="overview"><i class="fas fa-th-large"></i><span>Overview</span></button>
+      <button class="sb-item" data-panel="briefing"><i class="fas fa-sun"></i><span>Daily Briefing</span><span class="sb-badge new">NEW</span></button>
       <button class="sb-item" data-panel="chat"><i class="fas fa-comments"></i><span>AI Counselor</span></button>
       <button class="sb-item" data-panel="targets"><i class="fas fa-building"></i><span>Job Targets</span><span class="sb-badge" id="sb-targets-count">0</span></button>
       <button class="sb-item" data-panel="livejobs"><i class="fas fa-briefcase"></i><span>Live Jobs</span></button>
       <button class="sb-item" data-panel="tracker"><i class="fas fa-columns"></i><span>App Tracker</span><span class="sb-badge" id="sb-tracker-count">0</span></button>
       <button class="sb-item" data-panel="autopilot"><i class="fas fa-robot"></i><span>Autopilot Agent</span><span class="sb-badge new">FLAGSHIP</span></button>
+      <button class="sb-item" data-panel="outreach"><i class="fas fa-chart-funnel"></i><span>Outreach Analytics</span><span class="sb-badge new">NEW</span></button>
 
       <div class="sb-nav-label" style="margin-top:20px">AI TOOLS</div>
       <button class="sb-item" data-panel="mockvoice"><i class="fas fa-microphone-lines"></i><span>AI Mock Interview</span><span class="sb-badge new">NEW</span></button>
@@ -303,6 +305,8 @@
       <button class="sb-item" data-panel="resources"><i class="fas fa-cubes"></i><span>Resources Hub</span></button>
       <button class="sb-item" data-panel="salary"><i class="fas fa-rupee-sign"></i><span>Salary Insights</span></button>
       <button class="sb-item" data-panel="github"><i class="fab fa-github"></i><span>GitHub Analyzer</span></button>
+      <button class="sb-item" data-panel="emailscorer"><i class="fas fa-envelope-circle-check"></i><span>Email Scorer</span><span class="sb-badge new">NEW</span></button>
+      <button class="sb-item" data-panel="offers"><i class="fas fa-scale-balanced"></i><span>Offer Comparator</span><span class="sb-badge new">NEW</span></button>
 
       <div class="sb-nav-label" style="margin-top:20px">ACCOUNT</div>
       <button class="sb-item" data-panel="test" id="sb-test-btn"><i class="fas fa-graduation-cap"></i><span>Take Aptitude Test</span><span class="badge purple" id="sb-verified-badge" style="display:none;margin-left:auto;font-size:9px">✓</span></button>
@@ -1532,6 +1536,83 @@
 
       </div>
     </div>
+
+  <!-- ── Panel: Daily Briefing ─────────────────────────────────────────── -->
+  <div id="panel-briefing" class="panel">
+    <div class="panel-header">
+      <div>
+        <h2 class="panel-title"><i class="fas fa-sun" style="color:var(--c-gold)"></i> Good Morning!</h2>
+        <p class="panel-sub" id="briefing-date">Loading your daily briefing...</p>
+      </div>
+      <button class="btn-primary sm" onclick="loadDailyBriefing()"><i class="fas fa-sync"></i> Refresh</button>
+    </div>
+    <div id="briefing-body" style="display:grid;gap:18px;grid-template-columns:1fr 1fr">
+      <div class="card" style="grid-column:1/-1"><div class="sk-line" style="width:60%"></div><div class="sk-line"></div></div>
+    </div>
+  </div>
+
+  <!-- ── Panel: Outreach Analytics ────────────────────────────────────── -->
+  <div id="panel-outreach" class="panel">
+    <div class="panel-header">
+      <div>
+        <h2 class="panel-title"><i class="fas fa-chart-funnel" style="color:var(--c-purple)"></i> Outreach Analytics</h2>
+        <p class="panel-sub">Your complete job hunt performance dashboard</p>
+      </div>
+      <button class="btn-primary sm" onclick="loadOutreachAnalytics()"><i class="fas fa-sync"></i> Refresh</button>
+    </div>
+    <div id="outreach-body" style="display:grid;gap:18px;grid-template-columns:repeat(auto-fill,minmax(260px,1fr))">
+      <div class="card"><div class="sk-line" style="width:50%"></div><div class="sk-line"></div></div>
+    </div>
+  </div>
+
+  <!-- ── Panel: Cold Email Scorer ──────────────────────────────────────── -->
+  <div id="panel-emailscorer" class="panel">
+    <div class="panel-header">
+      <div>
+        <h2 class="panel-title"><i class="fas fa-envelope-circle-check" style="color:var(--c-blue)"></i> Cold Email Scorer</h2>
+        <p class="panel-sub">Paste your cold email or LinkedIn note and get an instant AI score</p>
+      </div>
+    </div>
+    <div style="display:grid;gap:18px;grid-template-columns:1fr 1fr">
+      <div class="card" style="display:flex;flex-direction:column;gap:12px">
+        <label class="form-label">Your Email / LinkedIn Message</label>
+        <textarea id="email-scorer-text" class="form-input" rows="10" placeholder="Hi [Name], I came across your company and I'm excited about the [Role] position..."></textarea>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+          <div>
+            <label class="form-label" style="font-size:11px">Company Name (optional)</label>
+            <input id="email-scorer-company" class="form-input" type="text" placeholder="e.g. TCS, Infosys...">
+          </div>
+          <div>
+            <label class="form-label" style="font-size:11px">Recipient Name (optional)</label>
+            <input id="email-scorer-recipient" class="form-input" type="text" placeholder="e.g. Priya, Rahul...">
+          </div>
+        </div>
+        <button class="btn-primary" onclick="scoreEmail()" id="score-email-btn"><i class="fas fa-wand-magic-sparkles"></i> Score My Email</button>
+      </div>
+      <div id="email-score-results" class="card" style="display:flex;flex-direction:column;gap:14px">
+        <div class="empty-state" style="padding:40px">
+          <i class="fas fa-envelope-open-text" style="font-size:40px;color:var(--c-blue);opacity:0.5"></i>
+          <p class="muted" style="margin-top:12px">Paste your email and click Score to get AI feedback</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Panel: Offer Comparator ───────────────────────────────────────── -->
+  <div id="panel-offers" class="panel">
+    <div class="panel-header">
+      <div>
+        <h2 class="panel-title"><i class="fas fa-scale-balanced" style="color:var(--c-green)"></i> Offer Comparator</h2>
+        <p class="panel-sub">Compare up to 3 job offers side by side with in-hand salary & AI recommendation</p>
+      </div>
+      <button class="btn-primary sm" onclick="addOfferSlot()" id="add-offer-btn"><i class="fas fa-plus"></i> Add Offer</button>
+    </div>
+    <div id="offers-grid" style="display:grid;gap:18px;grid-template-columns:repeat(auto-fill,minmax(280px,1fr))"></div>
+    <div id="offers-ai-result" style="margin-top:18px;display:none"></div>
+    <div style="margin-top:14px;text-align:center">
+      <button class="btn-primary" onclick="compareOffers()" id="compare-btn" style="display:none"><i class="fas fa-scale-balanced"></i> Compare & Get AI Pick</button>
+    </div>
+  </div>
 
   </main>
 </div>

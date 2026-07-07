@@ -4597,6 +4597,398 @@ async def sms_alert(req: SmsReq):
         return {"success": False, "configured": True, "error": str(e)}
 
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  ENTERPRISE FEATURES (Phase 3)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── Feature 1: Company Intelligence Deep Dive ─────────────────────────────────
+@app.get("/api/company-intel/{company_id}")
+def api_company_intel(company_id: int, request: Request):
+    if company_id < 0 or company_id >= len(COMPANIES):
+        raise HTTPException(404, "Company not found")
+    c = COMPANIES[company_id]
+
+    # Fetch top 5 recruiters for this company from DB
+    recruiters = []
+    try:
+        with _db() as conn:
+            rows = conn.execute(
+                "SELECT name, title, linkedin_url FROM contacts WHERE company_id=? LIMIT 5",
+                (company_id,)
+            ).fetchall()
+            recruiters = [dict(r) for r in rows]
+    except Exception:
+        pass
+
+    if llm_enabled():
+        prompt = (
+            f"You are a company research analyst. Provide a concise intel card for this company.\n"
+            f"Company: {c['name']}\nCategory: {c['category']}\nCity: {c.get('city','Ahmedabad')}\n"
+            f"Roles they hire for: {c.get('roles','Software Engineer')}\n"
+            f"Return ONLY raw JSON with these exact keys:\n"
+            '{"founded":"year or Unknown","size":"e.g. 50-200 employees","tech_stack":["tech1","tech2","tech3","tech4","tech5"],'
+            '"culture_signals":["signal1","signal2","signal3"],'
+            '"work_mode":"Remote/Hybrid/Onsite","growth_stage":"Startup/Scale-up/Enterprise/MNC",'
+            '"why_apply":"2-sentence reason why a job seeker should apply here",'
+            '"recent_news":"1 sentence about what this company is known for or any recent development"}'
+        )
+        data = _parse_json(llm_complete(prompt, system="You are a concise company intelligence analyst. Return only valid JSON.", temperature=0.3, max_tokens=400))
+        if data:
+            return {**c, "intel": data, "recruiters": recruiters}
+
+    # Fallback
+    return {
+        **c,
+        "intel": {
+            "founded": "Unknown",
+            "size": "50-500 employees",
+            "tech_stack": ["Python", "React", "AWS", "SQL", "Docker"],
+            "culture_signals": ["Fast-paced", "Tech-first", "Growth focused"],
+            "work_mode": "Hybrid",
+            "growth_stage": "Scale-up",
+            "why_apply": f"{c['name']} is an established {c['category']} company in {c.get('city','Ahmedabad')} offering exciting career opportunities.",
+            "recent_news": f"Active hiring in {c.get('roles','technical')} roles."
+        },
+        "recruiters": recruiters
+    }
+
+
+# ── Feature 2: Outreach Analytics Dashboard ───────────────────────────────────
+@app.get("/api/analytics/outreach")
+def api_outreach_analytics(request: Request):
+    auth_header = request.headers.get("Authorization", "")
+    user = _auth(auth_header)
+    if not user:
+        raise HTTPException(401, "Login required")
+
+    uid = user["id"]
+    now = time.time()
+    week_ago = now - 86400 * 7
+
+    with _db() as conn:
+        apps = conn.execute(
+            "SELECT status, applied_at, last_action_at, fit_score, company_id FROM applications WHERE user_id=?",
+            (uid,)
+        ).fetchall()
+
+    statuses = [dict(a) for a in apps]
+
+    # Funnel counts
+    total = len(statuses)
+    saved = sum(1 for a in statuses if a["status"] == "saved")
+    applied = sum(1 for a in statuses if a["status"] in ("applied", "emailed"))
+    replied = sum(1 for a in statuses if a["status"] == "replied")
+    interview = sum(1 for a in statuses if a["status"] == "interview")
+    offer = sum(1 for a in statuses if a["status"] == "offer")
+    rejected = sum(1 for a in statuses if a["status"] == "rejected")
+
+    # Weekly activity (apps added per day in last 7 days)
+    daily = {}
+    for a in statuses:
+        ts = a.get("applied_at") or a.get("last_action_at") or 0
+        if ts and ts > week_ago:
+            day = time.strftime("%a", time.localtime(ts))
+            daily[day] = daily.get(day, 0) + 1
+
+    days_order = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    weekly_chart = [{"day": d, "count": daily.get(d, 0)} for d in days_order]
+
+    # Company category breakdown
+    cat_counts = {}
+    for a in statuses:
+        cid = a.get("company_id", 0)
+        if 0 <= cid < len(COMPANIES):
+            cat = COMPANIES[cid].get("category", "Other")
+        else:
+            cat = "Other"
+        cat_counts[cat] = cat_counts.get(cat, 0) + 1
+    top_categories = sorted(cat_counts.items(), key=lambda x: -x[1])[:5]
+
+    # Streak: consecutive days with activity
+    activity_days = set()
+    for a in statuses:
+        ts = a.get("applied_at") or a.get("last_action_at") or 0
+        if ts:
+            activity_days.add(time.strftime("%Y-%m-%d", time.localtime(ts)))
+    streak = 0
+    d = now
+    while True:
+        key = time.strftime("%Y-%m-%d", time.localtime(d))
+        if key in activity_days:
+            streak += 1
+            d -= 86400
+        else:
+            break
+
+    # Avg days to response (for replied apps)
+    avg_days = None
+    resp_apps = [a for a in statuses if a["status"] in ("replied", "interview", "offer") and a.get("applied_at") and a.get("last_action_at")]
+    if resp_apps:
+        diffs = [(a["last_action_at"] - a["applied_at"]) / 86400 for a in resp_apps]
+        avg_days = round(sum(diffs) / len(diffs), 1)
+
+    # Avg fit score
+    scored = [a["fit_score"] for a in statuses if a.get("fit_score")]
+    avg_fit = round(sum(scored) / len(scored)) if scored else None
+
+    return {
+        "funnel": {
+            "total": total,
+            "saved": saved,
+            "applied": applied,
+            "replied": replied,
+            "interview": interview,
+            "offer": offer,
+            "rejected": rejected,
+        },
+        "weekly_chart": weekly_chart,
+        "top_categories": [{"category": k, "count": v} for k, v in top_categories],
+        "streak_days": streak,
+        "avg_response_days": avg_days,
+        "avg_fit_score": avg_fit,
+        "conversion_rate": round((replied / applied * 100) if applied else 0, 1),
+    }
+
+
+# ── Feature 3: Cold Email Scorer ──────────────────────────────────────────────
+class ScoreEmailRequest(BaseModel):
+    text: str
+    company_name: str = ""
+    recipient_name: str = ""
+
+@app.post("/api/score-email")
+def api_score_email(req: ScoreEmailRequest):
+    if len(req.text.strip()) < 30:
+        raise HTTPException(400, "Email too short to score")
+
+    if llm_enabled():
+        prompt = (
+            f"You are an expert cold email coach. Analyze this cold email/LinkedIn message and return ONLY raw JSON.\n\n"
+            f"Email:\n{req.text[:2000]}\n\n"
+            f"Company: {req.company_name or 'Not specified'}\n"
+            f"Recipient: {req.recipient_name or 'Not specified'}\n\n"
+            'Return JSON with these exact keys:\n'
+            '{"overall_score":75,"personalization_score":60,"clarity_score":80,"cta_score":70,"tone_score":75,'
+            '"personalization_feedback":"feedback","clarity_feedback":"feedback","cta_feedback":"feedback","tone_feedback":"feedback",'
+            '"top_strength":"one thing done well","top_weakness":"biggest issue",'
+            '"rewritten":"improved version of the email keeping same intent but more compelling"}'
+        )
+        data = _parse_json(llm_complete(prompt, system="You are a cold email optimization expert. Return only valid JSON.", temperature=0.3, max_tokens=800))
+        if data:
+            # Ensure all score fields are ints
+            for key in ("overall_score", "personalization_score", "clarity_score", "cta_score", "tone_score"):
+                if key in data:
+                    try:
+                        data[key] = int(data[key])
+                    except (TypeError, ValueError):
+                        data[key] = 70
+            return data
+
+    # Offline fallback — basic rule-based scoring
+    text = req.text.lower()
+    personalization = 80 if (req.company_name.lower() in text or req.recipient_name.lower() in text) else 40
+    clarity = 70 if len(req.text.split()) < 150 else 50
+    has_cta = any(w in text for w in ["reply", "connect", "schedule", "call", "meeting", "chat", "let me know"])
+    cta = 80 if has_cta else 30
+    tone = 75
+    overall = round((personalization + clarity + cta + tone) / 4)
+    return {
+        "overall_score": overall, "personalization_score": personalization,
+        "clarity_score": clarity, "cta_score": cta, "tone_score": tone,
+        "personalization_feedback": "Mention the company/person name for higher impact.",
+        "clarity_feedback": "Keep your email under 100 words for best results.",
+        "cta_feedback": "Always end with one clear ask — a call, a reply, or a coffee chat.",
+        "tone_feedback": "Use a confident but friendly tone.",
+        "top_strength": "Your email is direct and to the point.",
+        "top_weakness": "Missing a strong personalized opener.",
+        "rewritten": req.text
+    }
+
+
+# ── Feature 4: Offer Comparison Calculator ────────────────────────────────────
+class OfferCompareRequest(BaseModel):
+    offers: List[dict]  # list of offer dicts with ctc, bonus, role, company, perks etc.
+
+@app.post("/api/compare-offers")
+def api_compare_offers(req: OfferCompareRequest):
+    if not req.offers or len(req.offers) < 1:
+        raise HTTPException(400, "Provide at least 1 offer to analyze")
+    if len(req.offers) > 3:
+        req.offers = req.offers[:3]
+
+    def compute_inhand(ctc: float) -> dict:
+        """Rough Indian in-hand estimate."""
+        basic = ctc * 0.4
+        hra = ctc * 0.2
+        pf = min(21600, basic * 0.12)  # employer PF
+        gross = ctc - pf
+        # Standard deduction
+        taxable = max(0, gross - 50000)  # 50k standard deduction
+        # New tax regime slabs (FY 2025)
+        tax = 0.0
+        slabs = [(300000, 0), (300000, 0.05), (300000, 0.10), (300000, 0.15), (300000, 0.20), (float("inf"), 0.30)]
+        remaining = taxable
+        for slab_amt, rate in slabs:
+            chunk = min(remaining, slab_amt)
+            tax += chunk * rate
+            remaining -= chunk
+            if remaining <= 0:
+                break
+        monthly_inhand = round((gross - tax) / 12 / 1000) * 1000
+        return {
+            "annual_gross": round(gross),
+            "estimated_tax": round(tax),
+            "monthly_inhand": monthly_inhand
+        }
+
+    enriched = []
+    for o in req.offers:
+        ctc = float(o.get("ctc", 0)) * 100000  # input in LPA
+        bonus = float(o.get("bonus", 0)) * 100000
+        esop_value = float(o.get("esop", 0)) * 100000
+        inhand = compute_inhand(ctc)
+        # Perks score (0-100)
+        perks = o.get("perks", [])
+        perk_weights = {"remote": 20, "hybrid": 12, "health_insurance": 15, "meal": 8,
+                        "gym": 5, "learning_budget": 10, "flexible_hours": 15, "stock": 15}
+        perk_score = min(100, sum(perk_weights.get(p, 5) for p in perks))
+        # Growth score: MNC=60, product=80, startup=90
+        ctype = str(o.get("company_type", "")).lower()
+        growth = 90 if "startup" in ctype else (80 if "product" in ctype else 60)
+
+        total_value = ctc + bonus * 0.5 + esop_value * 0.3  # weighted total comp
+        enriched.append({**o, "ctc_rupees": ctc, "inhand": inhand,
+                         "perk_score": perk_score, "growth_score": growth,
+                         "total_value": total_value})
+
+    # AI pick
+    ai_pick = None
+    ai_reason = ""
+    if llm_enabled() and len(enriched) > 1:
+        offers_summary = "\n".join(
+            f"Offer {i+1}: {o.get('company','?')} | Role: {o.get('role','?')} | CTC: {o.get('ctc','?')} LPA | "
+            f"Bonus: {o.get('bonus',0)} LPA | ESOP: {o.get('esop',0)} LPA | Work mode: {o.get('work_mode','?')} | "
+            f"Company type: {o.get('company_type','?')} | Perks: {', '.join(o.get('perks',[]))}"
+            for i, o in enumerate(enriched)
+        )
+        prompt = (
+            f"You are a career advisor. Compare these job offers and recommend the best one.\n\n{offers_summary}\n\n"
+            'Return ONLY raw JSON: {"pick":1,"reason":"2-3 sentence explanation focusing on career growth, compensation, and stability"}'
+        )
+        result = _parse_json(llm_complete(prompt, system="You are an expert career advisor. Return only valid JSON.", temperature=0.2, max_tokens=200))
+        if result:
+            ai_pick = result.get("pick", 1)
+            ai_reason = result.get("reason", "")
+
+    if ai_pick is None and enriched:
+        best_idx = max(range(len(enriched)), key=lambda i: enriched[i]["total_value"])
+        ai_pick = best_idx + 1
+        ai_reason = f"Offer {ai_pick} has the highest total compensation value when factoring in CTC, bonus, and ESOP."
+
+    return {"offers": enriched, "ai_pick": ai_pick, "ai_reason": ai_reason}
+
+
+# ── Feature 5: Daily Briefing Panel ──────────────────────────────────────────
+@app.get("/api/daily-briefing")
+def api_daily_briefing(request: Request):
+    auth_header = request.headers.get("Authorization", "")
+    user = _auth(auth_header)
+    if not user:
+        raise HTTPException(401, "Login required")
+
+    uid = user["id"]
+    now = time.time()
+    seven_days_ago = now - 86400 * 7
+    today_str = time.strftime("%B %d, %Y", time.localtime(now))
+    weekday = time.strftime("%A", time.localtime(now))
+
+    with _db() as conn:
+        apps = conn.execute(
+            "SELECT id, company_id, status, applied_at, last_action_at, next_followup_at, notes FROM applications WHERE user_id=?",
+            (uid,)
+        ).fetchall()
+        apps = [dict(a) for a in apps]
+
+    # Follow-up due: applied >7 days ago, no reply yet
+    followups_due = []
+    for a in apps:
+        if a["status"] in ("applied", "emailed"):
+            applied_ts = a.get("applied_at") or 0
+            if applied_ts and (now - applied_ts) > 86400 * 7:
+                cid = a.get("company_id", 0)
+                cname = COMPANIES[cid]["name"] if 0 <= cid < len(COMPANIES) else "Unknown"
+                followups_due.append({"company": cname, "app_id": a["id"], "days_since": int((now - applied_ts) / 86400)})
+    followups_due = followups_due[:5]
+
+    # Today's priority actions
+    priorities = []
+    if followups_due:
+        priorities.append(f"Follow up with {len(followups_due)} companies that haven't replied in 7+ days")
+    active_count = sum(1 for a in apps if a["status"] in ("saved", "applied", "emailed"))
+    if active_count < 5:
+        priorities.append(f"You have only {active_count} active applications — add at least {5 - active_count} more today")
+    interview_apps = [a for a in apps if a["status"] == "interview"]
+    if interview_apps:
+        priorities.append(f"🎯 Interview scheduled! Prepare for {len(interview_apps)} upcoming interview(s)")
+    if not priorities:
+        priorities.append("Keep the momentum — target 2-3 new companies from your Job Targets panel today")
+    priorities.append("Update application statuses after any replies or contacts made")
+
+    # Progress stats
+    total = len(apps)
+    interviews = sum(1 for a in apps if a["status"] == "interview")
+    offers = sum(1 for a in apps if a["status"] == "offer")
+    replies = sum(1 for a in apps if a["status"] in ("replied", "interview", "offer"))
+
+    # Skill of the day
+    skills_of_day = [
+        ("System Design", "Practice designing a scalable URL shortener — interviewers love this question."),
+        ("DSA", "Solve 2 medium LeetCode problems today — focus on sliding window patterns."),
+        ("Behavioural", "Prepare a STAR-format story for 'Tell me about a challenge you overcame.'"),
+        ("Networking", "Connect with 3 new people in your target companies on LinkedIn today."),
+        ("Resume", "Quantify one more bullet point on your resume (e.g., 'Improved X by Y%')."),
+        ("LLM/AI Skills", "Study RAG pipelines — top AI companies ask about vector databases."),
+        ("Communication", "Practice a 90-second intro pitch out loud — record and review it."),
+    ]
+    dow = int(time.strftime("%w", time.localtime(now)))
+    skill_tip = skills_of_day[dow % len(skills_of_day)]
+
+    # Motivational insight
+    motivations = [
+        "Every application you send is a seed planted. Some take time to grow — keep planting.",
+        "The job you land will be worth every rejection you powered through. Stay consistent.",
+        "Top performers don't wait for perfect conditions — they take action every single day.",
+        "Your skills are real. Your effort is real. The right company will see that.",
+        "Success in a job hunt is a volume game + quality game. Today, optimize both.",
+        "Rejection isn't failure — it's data. Each 'no' teaches you how to get the next 'yes'.",
+        "You're one email, one connection, one interview away from everything changing.",
+    ]
+    motivation = motivations[int(now / 86400) % len(motivations)]
+
+    # AI-generated personalized insight
+    ai_insight = None
+    if llm_enabled():
+        prompt = (
+            f"Job seeker context:\n- Total applications: {total}\n- Interviews: {interviews}\n"
+            f"- Offers: {offers}\n- Pending follow-ups: {len(followups_due)}\n"
+            f"- Weekday: {weekday}\n\nWrite a 2-sentence personalized morning message for this job seeker. "
+            f"Be encouraging, specific, and action-oriented. No markdown, just plain text."
+        )
+        ai_insight = llm_complete(prompt, system="You are an empathetic career coach.", temperature=0.6, max_tokens=100)
+
+    return {
+        "date": today_str,
+        "weekday": weekday,
+        "priorities": priorities,
+        "followups_due": followups_due,
+        "stats": {"total": total, "interviews": interviews, "offers": offers, "replies": replies},
+        "skill_of_day": {"skill": skill_tip[0], "tip": skill_tip[1]},
+        "motivation": motivation,
+        "ai_insight": ai_insight,
+    }
+
+
 # ── Catch-all: serve frontend static files (CSS, JS, images) ─────────────────
 @app.get("/{file_path:path}")
 def serve_static(file_path: str):
