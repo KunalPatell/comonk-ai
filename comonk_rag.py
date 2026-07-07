@@ -11,7 +11,8 @@ import openpyxl
 import chromadb
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 
-CHROMA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chroma_db")
+_DATA_DIR = "/data" if os.path.exists("/data") and os.access("/data", os.W_OK) else os.path.dirname(os.path.abspath(__file__))
+CHROMA_DIR = os.path.join(_DATA_DIR, "chroma_db")
 EXCEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Ahmedabad_IT_AIML_FINAL_MASTER.xlsx")
 
 _client = None
@@ -49,12 +50,15 @@ def _index_companies():
     ws = wb["All Companies"]
     docs, ids, metas = [], [], []
 
-    for idx, row in enumerate(ws.iter_rows(min_row=4, values_only=True)):
+    for idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True)):
         if not row[1]:
             continue
-        cols = (row + (None,) * 13)[:13]
-        _, name, cat, roles, e1, e2, e3, e4, e5, phone, website, linkedin, address = cols
-        emails = [str(e).strip() for e in (e1, e2, e3, e4, e5) if e]
+        # New sheet layout: No, Company, Category, City, Roles, Phone, Website,
+        # Address, LinkedIn, Priority, Source, Email 1..17
+        r = tuple(row) + (None,) * 28
+        name, cat, city, roles = r[1], r[2], r[3], r[4]
+        phone, website, address, linkedin = r[5], r[6], r[7], r[8]
+        emails = [str(e).strip() for e in r[11:28] if e and "@" in str(e)]
 
         # Rich natural-language document for semantic embedding
         doc = (

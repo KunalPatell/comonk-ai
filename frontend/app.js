@@ -3828,17 +3828,34 @@ async function mvStart(){
   mvRenderQuestion();
 }
 
+window.mvSpeakQuestion = function() {
+  if ('speechSynthesis' in window) {
+    window.speechSynthesis.cancel();
+    const q = mockState.questions[mockState.current];
+    const u = new SpeechSynthesisUtterance(q.q);
+    u.lang = 'en-IN';
+    u.rate = 0.95;
+    window.speechSynthesis.speak(u);
+  } else {
+    toast('Text-to-speech not supported in this browser', 'warning');
+  }
+};
+
 function mvRenderQuestion(){
   const {questions,current}=mockState;
   if(current>=questions.length){ mvFinish(); return; }
   const q=questions[current];
   const supported = 'webkitSpeechRecognition' in window || 'SpeechRecognition' in window;
+  if ('speechSynthesis' in window) window.speechSynthesis.cancel();
   $('mockvoice-area').innerHTML=`
     <div class="mv-wrap">
       <div class="mv-progress"><span>Question ${current+1} of ${questions.length}</span><div class="mv-prog-track"><div class="mv-prog-fill" style="width:${(current/questions.length)*100}%"></div></div></div>
       <div class="card mv-qcard">
         <span class="badge ${q.type==='technical'?'blue':'purple'}">${q.type}</span>
-        <h3 class="mv-question">${escHtml(q.q)}</h3>
+        <h3 class="mv-question" style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+          <span>${escHtml(q.q)}</span>
+          <button class="btn-xs ghost" onclick="mvSpeakQuestion()" title="Listen to question" style="margin-left:auto;white-space:nowrap"><i class="fas fa-volume-up"></i> Listen</button>
+        </h3>
         <div class="mv-mic-row">
           ${supported?`<button class="mv-mic" id="mv-mic-btn"><i class="fas fa-microphone"></i></button><span class="mv-mic-hint" id="mv-mic-hint">Tap to speak</span>`:''}
         </div>
@@ -3852,7 +3869,11 @@ function mvRenderQuestion(){
     </div>`;
   if(supported) mvWireMic();
   $('mv-submit-btn').addEventListener('click', mvScore);
-  $('mv-skip-btn').addEventListener('click', ()=>{ mockState.current++; mvRenderQuestion(); });
+  $('mv-skip-btn').addEventListener('click', ()=>{ 
+    if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+    mockState.current++; 
+    mvRenderQuestion(); 
+  });
 }
 
 function mvWireMic(){
@@ -3899,7 +3920,11 @@ async function mvScore(){
       ${res.model_answer?`<div class="mv-model"><h5 class="purple"><i class="fas fa-wand-magic-sparkles"></i> Model answer</h5><p>${escHtml(res.model_answer)}</p></div>`:''}
       <button class="btn-primary" style="width:100%;margin-top:14px" id="mv-next-btn">${mockState.current+1>=mockState.questions.length?'<i class="fas fa-flag-checkered"></i> Finish & See Summary':'<i class="fas fa-arrow-right"></i> Next Question'}</button>
     </div>`;
-  $('mv-next-btn').addEventListener('click', ()=>{ mockState.current++; mvRenderQuestion(); });
+  $('mv-next-btn').addEventListener('click', ()=>{ 
+    if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+    mockState.current++; 
+    mvRenderQuestion(); 
+  });
 }
 
 function mvFinish(){

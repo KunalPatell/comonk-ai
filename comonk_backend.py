@@ -21,7 +21,7 @@ Free API keys to add in .env  (see .env.example):
   TWILIO_FROM_NUMBER   — console.twilio.com (your Twilio phone number)
 """
 
-import os, re, json, io, asyncio, sqlite3, hashlib, secrets, time
+import os, re, json, io, asyncio, sqlite3, hashlib, secrets, time, collections
 from typing import List, Optional
 import httpx
 from fastapi import FastAPI, File, UploadFile, HTTPException, Request
@@ -34,7 +34,8 @@ from questions import get_questions_for_role
 # ══════════════════════════════════════════════════════════════════════════════
 #  AUTH / USER DB
 # ══════════════════════════════════════════════════════════════════════════════
-_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "comonk.db")
+_DATA_DIR = "/data" if os.path.exists("/data") and os.access("/data", os.W_OK) else os.path.dirname(os.path.abspath(__file__))
+_DB = os.path.join(_DATA_DIR, "comonk.db")
 
 def _db():
     conn = sqlite3.connect(_DB, timeout=15)
@@ -238,12 +239,15 @@ def load_companies():
         return
     wb = openpyxl.load_workbook(EXCEL_PATH, read_only=True)
     ws = wb["All Companies"]
-    for idx, row in enumerate(ws.iter_rows(min_row=4, values_only=True)):
+    for idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True)):
         if not row[1]:
             continue
-        cols = (row + (None,) * 17)[:17]
-        _, name, cat, roles, e1, e2, e3, e4, e5, phone, website, linkedin, address, city, priority, source, e6 = cols
-        emails = [str(e).strip() for e in (e1, e2, e3, e4, e5, e6) if e]
+        # New sheet layout: No, Company, Category, City, Roles, Phone, Website,
+        # Address, LinkedIn, Priority, Source, Email 1..17
+        r = tuple(row) + (None,) * 28
+        name, cat, city, roles = r[1], r[2], r[3], r[4]
+        phone, website, address, linkedin = r[5], r[6], r[7], r[8]
+        emails = [str(e).strip() for e in r[11:28] if e and "@" in str(e)]
         COMPANIES.append({
             "id": idx, "name": str(name).strip(), "category": str(cat or "").strip(),
             "roles": str(roles or "").strip(), "emails": emails,
@@ -311,6 +315,35 @@ app = FastAPI(
 )
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
+class TokenBucketRateLimiter:
+    def __init__(self, requests: int, window: int):
+        self.requests = requests
+        self.window = window
+        self.records = collections.defaultdict(list)
+
+    def check(self, ip: str) -> bool:
+        now = time.time()
+        history = self.records[ip]
+        history = [t for t in history if now - t < self.window]
+        self.records[ip] = history
+        if len(history) >= self.requests:
+            return False
+        self.records[ip].append(now)
+        return True
+
+_api_limiter = TokenBucketRateLimiter(requests=20, window=60)
+
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    if request.url.path.startswith("/api/"):
+        ip = request.client.host if request.client else "unknown"
+        if not _api_limiter.check(ip):
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "Too many requests. Please wait a minute before trying again."}
+            )
+    return await call_next(request)
+
 _FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend")
 
 @app.get("/")
@@ -376,6 +409,235 @@ _sessions: dict = {}
 # ═══════════════════════════════════════════════════════════════════════════════
 #  CORE ENDPOINTS
 # ═══════════════════════════════════════════════════════════════════════════════
+
+from fastapi.responses import HTMLResponse
+
+@app.get("/api/admin/analytics")
+def api_admin_analytics():
+    try:
+        with _db() as c:
+            total_users = c.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+            total_sessions = c.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+            
+            test_stats = c.execute("""
+                SELECT 
+                    COUNT(*), 
+                    AVG(score), 
+                    SUM(CASE WHEN tab_switches > 0 THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN suspicious = 1 THEN 1 ELSE 0 END)
+                FROM test_attempts
+            """).fetchone()
+            
+            total_tests = test_stats[0] or 0
+            avg_score = round(test_stats[1] or 0, 1)
+            total_tab_switches = test_stats[2] or 0
+            total_suspicious = test_stats[3] or 0
+            
+            contact_stats = c.execute("""
+                SELECT 
+                    COUNT(*),
+                    SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END)
+                FROM contact_requests
+            """).fetchone()
+            
+            total_contacts = contact_stats[0] or 0
+            pending_contacts = contact_stats[1] or 0
+            
+            recent_attempts = c.execute("""
+                SELECT t.id, u.email, t.role, t.score, t.total, t.tab_switches, t.suspicious, t.created_at 
+                FROM test_attempts t 
+                JOIN users u ON t.user_id = u.id 
+                ORDER BY t.id DESC LIMIT 10
+            """).fetchall()
+            
+            attempts_list = []
+            for r in recent_attempts:
+                attempts_list.append({
+                    "id": r[0], "email": r[1], "role": r[2], "score": r[3], "total": r[4],
+                    "tab_switches": r[5], "suspicious": r[6], "created_at": r[7]
+                })
+
+        return {
+            "success": True,
+            "stats": {
+                "total_users": total_users,
+                "active_sessions": total_sessions,
+                "total_tests": total_tests,
+                "avg_test_score": avg_score,
+                "total_tab_switches": total_tab_switches,
+                "suspicious_attempts": total_suspicious,
+                "total_contact_requests": total_contacts,
+                "pending_contact_requests": pending_contacts
+            },
+            "recent_activity": attempts_list
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+@app.get("/admin", response_class=HTMLResponse)
+def admin_page():
+    html_content = """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Comonk AI - Admin Analytics</title>
+        <script src="https://cdn.tailwindcss.com"></script>
+        <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+        <style>
+            body {
+                background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%);
+                color: #f8fafc;
+                min-height: 100vh;
+                font-family: 'Inter', sans-serif;
+            }
+            .glass {
+                background: rgba(30, 41, 59, 0.4);
+                backdrop-filter: blur(12px);
+                border: 1px rgba(255, 255, 255, 0.08) solid;
+            }
+        </style>
+    </head>
+    <body class="p-6 md:p-12">
+        <div class="max-w-7xl mx-auto">
+            <div class="flex flex-col md:flex-row md:items-center justify-between pb-8 border-b border-slate-800 gap-4">
+                <div>
+                    <h1 class="text-3xl font-extrabold tracking-tight bg-gradient-to-r from-violet-400 via-indigo-300 to-cyan-400 bg-clip-text text-transparent flex items-center gap-3">
+                        <i class="fa-solid fa-chart-line"></i> Comonk AI Analytics
+                    </h1>
+                    <p class="text-slate-400 mt-1">Real-time system stats, anti-cheat indicators, and activity tracking</p>
+                </div>
+                <div class="flex items-center gap-3">
+                    <span class="px-3 py-1 bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 rounded-full text-xs font-semibold flex items-center gap-1.5">
+                        <span class="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span> Live Database Connected
+                    </span>
+                    <button onclick="loadAnalytics()" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 transition rounded-lg text-sm font-semibold shadow-lg shadow-indigo-600/20 flex items-center gap-2">
+                        <i class="fa-solid fa-arrows-rotate"></i> Refresh
+                    </button>
+                </div>
+            </div>
+
+            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 mt-8" id="stats-grid">
+                <div class="glass p-6 rounded-2xl animate-pulse h-32"></div>
+                <div class="glass p-6 rounded-2xl animate-pulse h-32"></div>
+                <div class="glass p-6 rounded-2xl animate-pulse h-32"></div>
+                <div class="glass p-6 rounded-2xl animate-pulse h-32"></div>
+            </div>
+
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-8 mt-8">
+                <div class="glass p-6 rounded-2xl lg:col-span-1 flex flex-col justify-between">
+                    <div>
+                        <h3 class="text-xl font-bold flex items-center gap-2 mb-4 text-violet-400">
+                            <i class="fa-solid fa-shield-halved"></i> Cheating & Security Signals
+                        </h3>
+                        <p class="text-sm text-slate-400 mb-6">Monitoring tab-switching and suspicious activities during mock tests.</p>
+                        
+                        <div class="space-y-4">
+                            <div class="flex justify-between items-center p-3 rounded-lg bg-slate-900/40 border border-slate-800">
+                                <span class="text-slate-300 flex items-center gap-2"><i class="fa-solid fa-window-restore text-cyan-400"></i> Tab Switches</span>
+                                <span class="text-lg font-bold" id="stat-tab-switches">-</span>
+                            </div>
+                            <div class="flex justify-between items-center p-3 rounded-lg bg-slate-900/40 border border-slate-800">
+                                <span class="text-slate-300 flex items-center gap-2"><i class="fa-solid fa-triangle-exclamation text-amber-400"></i> Suspicious Flagged</span>
+                                <span class="text-lg font-bold" id="stat-suspicious">-</span>
+                            </div>
+                            <div class="flex justify-between items-center p-3 rounded-lg bg-slate-900/40 border border-slate-800">
+                                <span class="text-slate-300 flex items-center gap-2"><i class="fa-solid fa-envelope-open-text text-indigo-400"></i> Contact Requests</span>
+                                <span class="text-lg font-bold" id="stat-contact-requests">-</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="mt-8 pt-4 border-t border-slate-800/60 text-xs text-slate-500">
+                        * Anti-cheat triggers when candidate switches browser tabs during tests.
+                    </div>
+                </div>
+
+                <div class="glass p-6 rounded-2xl lg:col-span-2">
+                    <h3 class="text-xl font-bold flex items-center gap-2 mb-4 text-cyan-400">
+                        <i class="fa-solid fa-clock-rotate-left"></i> Recent Mock Test Attempts
+                    </h3>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-left text-sm text-slate-300">
+                            <thead>
+                                <tr class="text-slate-400 border-b border-slate-805">
+                                    <th class="py-3 px-2">Candidate Email</th>
+                                    <th class="py-3 px-2">Role</th>
+                                    <th class="py-3 px-2 text-center">Score</th>
+                                    <th class="py-3 px-2 text-center">Tab Switches</th>
+                                    <th class="py-3 px-2 text-center">Flag</th>
+                                </tr>
+                            </thead>
+                            <tbody id="activity-tbody">
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <script>
+            async function loadAnalytics() {
+                try {
+                    const response = await fetch('/api/admin/analytics');
+                    const data = await response.json();
+                    if (!data.success) {
+                        alert('Error loading metrics: ' + data.error);
+                        return;
+                    }
+                    const stats = data.stats;
+                    
+                    document.getElementById('stats-grid').innerHTML = `
+                        <div class="glass p-6 rounded-2xl border-l-4 border-violet-500 shadow-xl shadow-violet-500/5">
+                            <div class="text-slate-400 text-sm font-semibold">Total Registered Users</div>
+                            <div class="text-3xl font-extrabold mt-2 text-white">${stats.total_users}</div>
+                        </div>
+                        <div class="glass p-6 rounded-2xl border-l-4 border-emerald-500 shadow-xl shadow-emerald-500/5">
+                            <div class="text-slate-400 text-sm font-semibold">Mock Tests Practiced</div>
+                            <div class="text-3xl font-extrabold mt-2 text-white">${stats.total_tests}</div>
+                        </div>
+                        <div class="glass p-6 rounded-2xl border-l-4 border-cyan-500 shadow-xl shadow-cyan-500/5">
+                            <div class="text-slate-400 text-sm font-semibold">Avg Test Score</div>
+                            <div class="text-3xl font-extrabold mt-2 text-white">${stats.avg_test_score} %</div>
+                        </div>
+                        <div class="glass p-6 rounded-2xl border-l-4 border-amber-500 shadow-xl shadow-amber-500/5">
+                            <div class="text-slate-400 text-sm font-semibold">Active Sessions</div>
+                            <div class="text-3xl font-extrabold mt-2 text-white">${stats.active_sessions}</div>
+                        </div>
+                    `;
+
+                    document.getElementById('stat-tab-switches').textContent = stats.total_tab_switches;
+                    document.getElementById('stat-suspicious').textContent = stats.suspicious_attempts;
+                    document.getElementById('stat-contact-requests').textContent = stats.pending_contact_requests + ' / ' + stats.total_contact_requests;
+
+                    const tbody = document.getElementById('activity-tbody');
+                    if (data.recent_activity.length === 0) {
+                        tbody.innerHTML = '<tr><td colspan="5" class="text-center py-6 text-slate-500">No mock tests attempted yet</td></tr>';
+                    } else {
+                        tbody.innerHTML = data.recent_activity.map(row => {
+                            const isSusp = row.suspicious ? '<span class="px-2 py-0.5 bg-red-500/10 text-red-400 border border-red-500/20 text-xs rounded-full">Suspicious</span>' : '<span class="px-2 py-0.5 bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 text-xs rounded-full">Pass</span>';
+                            const scoreColor = row.score >= (row.total * 0.7) ? 'text-emerald-400' : row.score >= (row.total * 0.45) ? 'text-amber-400' : 'text-red-400';
+                            return `
+                                <tr class="border-b border-slate-800/40 hover:bg-slate-900/10 transition">
+                                    <td class="py-3 px-2 text-slate-200">${row.email}</td>
+                                    <td class="py-3 px-2 text-slate-400">${row.role}</td>
+                                    <td class="py-3 px-2 text-center font-bold ${scoreColor}">${row.score} / ${row.total}</td>
+                                    <td class="py-3 px-2 text-center text-slate-400">${row.tab_switches}</td>
+                                    <td class="py-3 px-2 text-center">${isSusp}</td>
+                                </tr>
+                            `;
+                        }).join('');
+                    }
+                } catch (e) {
+                    console.error(e);
+                }
+            }
+            window.onload = loadAnalytics;
+        </script>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
 
 @app.get("/api/stats")
 def api_stats():
