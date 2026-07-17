@@ -240,32 +240,43 @@ def _get_run_chat():
     return _run_chat_fn
 
 # ── Simple LLM fallback (when langgraph not installed) ───────────────────────
-_llm_providers = None
+from contextvars import ContextVar
+
+# ContextVars for API Key Overrides
+groq_key_var = ContextVar("groq_key", default="")
+gemini_key_var = ContextVar("gemini_key", default="")
+openai_key_var = ContextVar("openai_key", default="")
+serpapi_key_var = ContextVar("serpapi_key", default="")
+huggingface_token_var = ContextVar("huggingface_token", default="")
+mistral_key_var = ContextVar("mistral_key", default="")
+
 _llm_clients: dict = {}
 
 def _get_providers():
-    global _llm_providers
-    if _llm_providers is None:
-        p = []
-        if os.environ.get("GROQ_API_KEY", "").strip():
-            p.append({"name":"groq","key":os.environ["GROQ_API_KEY"].strip(),"base_url":"https://api.groq.com/openai/v1","model":os.environ.get("GROQ_MODEL","llama-3.3-70b-versatile")})
-        if os.environ.get("GEMINI_API_KEY", "").strip():
-            p.append({"name":"gemini-openai","key":os.environ["GEMINI_API_KEY"].strip(),"base_url":"https://generativelanguage.googleapis.com/v1beta/openai","model":"gemini-1.5-flash"})
-        if os.environ.get("MISTRAL_API_KEY", "").strip():
-            p.append({"name":"mistral","key":os.environ["MISTRAL_API_KEY"].strip(),"base_url":"https://api.mistral.ai/v1","model":os.environ.get("MISTRAL_MODEL","mistral-small-latest")})
-        if os.environ.get("OPENAI_API_KEY", "").strip():
-            p.append({"name":"openai","key":os.environ["OPENAI_API_KEY"].strip(),"base_url":None,"model":os.environ.get("OPENAI_MODEL","gpt-4o-mini")})
-        _llm_providers = p
-    return _llm_providers
+    p = []
+    groq_key = groq_key_var.get().strip() or os.environ.get("GROQ_API_KEY", "").strip()
+    if groq_key:
+        p.append({"name":"groq","key":groq_key,"base_url":"https://api.groq.com/openai/v1","model":os.environ.get("GROQ_MODEL","llama-3.3-70b-versatile")})
+    gemini_key = gemini_key_var.get().strip() or os.environ.get("GEMINI_API_KEY", "").strip()
+    if gemini_key:
+        p.append({"name":"gemini-openai","key":gemini_key,"base_url":"https://generativelanguage.googleapis.com/v1beta/openai","model":"gemini-1.5-flash"})
+    mistral_key = mistral_key_var.get().strip() or os.environ.get("MISTRAL_API_KEY", "").strip()
+    if mistral_key:
+        p.append({"name":"mistral","key":mistral_key,"base_url":"https://api.mistral.ai/v1","model":os.environ.get("MISTRAL_MODEL","mistral-small-latest")})
+    openai_key = openai_key_var.get().strip() or os.environ.get("OPENAI_API_KEY", "").strip()
+    if openai_key:
+        p.append({"name":"openai","key":openai_key,"base_url":None,"model":os.environ.get("OPENAI_MODEL","gpt-4o-mini")})
+    return p
 
 def _llm_client(p):
-    if p["name"] not in _llm_clients:
+    cache_key = (p["name"], p["key"])
+    if cache_key not in _llm_clients:
         from openai import OpenAI
         kw = {"api_key": p["key"]}
         if p["base_url"]:
             kw["base_url"] = p["base_url"]
-        _llm_clients[p["name"]] = OpenAI(**kw)
-    return _llm_clients[p["name"]]
+        _llm_clients[cache_key] = OpenAI(**kw)
+    return _llm_clients[cache_key]
 
 def llm_enabled() -> bool:
     return len(_get_providers()) > 0
@@ -411,6 +422,16 @@ class TokenBucketRateLimiter:
         return True
 
 _api_limiter = TokenBucketRateLimiter(requests=20, window=60)
+
+@app.middleware("http")
+async def api_key_override_middleware(request: Request, call_next):
+    groq_key_var.set(request.headers.get("x-groq-key", ""))
+    gemini_key_var.set(request.headers.get("x-gemini-key", ""))
+    openai_key_var.set(request.headers.get("x-openai-key", ""))
+    serpapi_key_var.set(request.headers.get("x-serpapi-key", ""))
+    huggingface_token_var.set(request.headers.get("x-huggingface-token", ""))
+    mistral_key_var.set(request.headers.get("x-mistral-key", ""))
+    return await call_next(request)
 
 @app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
@@ -759,21 +780,30 @@ def admin_page():
 
 @app.get("/api/stats")
 def api_stats():
-    total_hr = sum(1 for c in COMPANIES if c["emails"] or c["phone"])
-    ai_count = sum(1 for c in COMPANIES if "AI" in c["category"])
-    providers = _get_providers()
+    try:
+        total_hr = sum(1 for c in COMPANIES if c.get("emails") or c.get("phone"))
+        ai_count = sum(1 for c in COMPANIES if "AI" in (c.get("category") or ""))
+        providers = _get_providers()
+        llm_provider = providers[0]["name"] if providers else "offline"
+        llm_on = llm_enabled()
+    except Exception as e:
+        print(f"[api_stats] company/provider stats failed: {e}")
+        total_hr = ai_count = 0
+        llm_provider = "offline"
+        llm_on = False
     try:
         from comonk_rag import get_company_count
         rag_count = get_company_count()
-    except Exception:
+    except Exception as e:
+        print(f"[api_stats] rag count failed: {e}")
         rag_count = 0
     return {
         "total_companies": len(COMPANIES),
         "total_hr_contacts": total_hr,
         "agent_tools_active": 12,   # updated count with all new features
         "ai_ml_companies": ai_count,
-        "llm_active": llm_enabled(),
-        "llm_provider": providers[0]["name"] if providers else "offline",
+        "llm_active": llm_on,
+        "llm_provider": llm_provider,
         "langgraph_active": True,
         "rag_indexed": rag_count,
     }
@@ -4992,11 +5022,11 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     providers = _get_providers()
     print("=" * 62)
-    print("  COMONK AI v3 — LangChain + LangGraph Career Platform")
+    print("  COMONK AI v3 -- LangChain + LangGraph Career Platform")
     print(f"  API + Frontend : http://127.0.0.1:{port}")
-    print(f"  LLM            : {'ON — ' + providers[0]['name'] + ' (' + providers[0]['model'] + ')' if providers else 'OFF — add GROQ_API_KEY to .env'}")
+    print(f"  LLM            : {'ON -- ' + providers[0]['name'] + ' (' + providers[0]['model'] + ')' if providers else 'OFF -- add GROQ_API_KEY to .env'}")
     print(f"  Companies      : {len(COMPANIES)} loaded")
     print(f"  Features       : YouTube, GitHub, News, Jobs, Salary, HR Email, SMS/WhatsApp")
     print("  Press CTRL+C to stop.")
     print("=" * 62)
-    uvicorn.run("comonk_backend:app", host="0.0.0.0", port=port, reload=True)
+    uvicorn.run("comonk_backend:app", host="0.0.0.0", port=port, reload=False)
