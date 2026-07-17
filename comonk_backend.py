@@ -385,27 +385,12 @@ def score_company(c: dict, skills: List[str]) -> int:
     text = (c["roles"] + " " + c["category"]).lower()
     return sum(1 for s in skills if s.lower() in text)
 
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
-from fastapi import Depends, status
-
-security = HTTPBasic()
-
-def authenticate_user(credentials: HTTPBasicCredentials = Depends(security)):
-    correct_username = secrets.compare_digest(credentials.username, "Kunal")
-    correct_password = secrets.compare_digest(credentials.password, "Comonk@77")
-    if not (correct_username and correct_password):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect username or password",
-            headers={"WWW-Authenticate": "Basic"},
-        )
-    return credentials.username
-
 # ── FastAPI app ───────────────────────────────────────────────────────────────
+# Public product — no blanket auth. /api/admin/* routes protect themselves via
+# _admin_check()/ADMIN_PW below; nothing else needs gating.
 app = FastAPI(
     title="Comonk AI",
     version="3.0.0",
-    dependencies=[Depends(authenticate_user)]
 )
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
