@@ -23,6 +23,11 @@ Thumbs.db
 # Large personal data files (not needed in repo)
 *.pdf
 *.vcf
+*.csv
+*.xlsx
+*.xls
+*.txt
+!requirements*.txt
 clean_hr_linkedin_list.csv
 emails.csv
 all_bcc_emails.txt
