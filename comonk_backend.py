@@ -22,6 +22,7 @@ Free API keys to add in .env  (see .env.example):
 """
 
 import os, re, json, io, asyncio, sqlite3, hashlib, secrets, time, collections
+import bcrypt
 from typing import List, Optional
 import httpx
 from fastapi import FastAPI, File, UploadFile, HTTPException, Request
@@ -173,12 +174,17 @@ def _migrate():
 _migrate()
 
 def _hash_pw(pw: str) -> str:
-    s = secrets.token_hex(16)
-    h = hashlib.sha256(f"{s}{pw}".encode()).hexdigest()
-    return f"{s}:{h}"
+    # bcrypt for all new/rehashed passwords. Old accounts still carry the
+    # legacy "salt:sha256hex" format (see _verify_pw) until they next log in.
+    return "bcrypt:" + bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
 
 def _verify_pw(pw: str, stored: str) -> bool:
     try:
+        if stored.startswith("bcrypt:"):
+            return bcrypt.checkpw(pw.encode(), stored[len("bcrypt:"):].encode())
+        # Legacy format from before the bcrypt migration - still verifiable so
+        # existing users aren't locked out; the login route re-hashes to
+        # bcrypt on a successful legacy verify so this path drains over time.
         s, h = stored.split(":", 1)
         return hashlib.sha256(f"{s}{pw}".encode()).hexdigest() == h
     except Exception:
@@ -202,7 +208,14 @@ def _auth(token: str):
         ).fetchone()
     return dict(row) if row else None
 
-ADMIN_PW = os.getenv("ADMIN_PASSWORD", "comonk_admin_2026")
+# No hardcoded fallback - a fixed default here would be a known, public admin
+# password for anyone who reads this (now-public) source file. Render's
+# ADMIN_PASSWORD env var is expected to be set in production; if it isn't, a
+# random one is generated per boot and logged so admin access still works
+# locally, but nobody gets a guessable default.
+ADMIN_PW = os.getenv("ADMIN_PASSWORD") or secrets.token_urlsafe(24)
+if not os.getenv("ADMIN_PASSWORD"):
+    print(f"[WARN] ADMIN_PASSWORD not set - generated a random one for this boot: {ADMIN_PW}")
 
 # ── .env loader ───────────────────────────────────────────────────────────────
 def _load_dotenv(path=".env"):
@@ -4008,38 +4021,6 @@ async def api_huggingface_chat(req: HFReq):
         return {"text": None, "error": str(e)}
 
 
-# ── GitHub Profile Stats ──────────────────────────────────────────────────────
-@app.get("/api/github-profile")
-async def api_github_profile(username: str = ""):
-    if not username:
-        return {"error": "username required"}
-    try:
-        headers = {}
-        token = os.getenv("GITHUB_TOKEN", "")
-        if token:
-            headers["Authorization"] = f"token {token}"
-        r = httpx.get(f"https://api.github.com/users/{username}", headers=headers, timeout=8)
-        if r.status_code == 404:
-            return {"found": False, "error": "User not found"}
-        d = r.json()
-        # Get repos
-        repos_r = httpx.get(f"https://api.github.com/users/{username}/repos?sort=stars&per_page=5", headers=headers, timeout=8)
-        repos = repos_r.json() if repos_r.status_code == 200 else []
-        top_repos = [{"name": repo["name"], "stars": repo["stargazers_count"],
-                      "language": repo["language"], "url": repo["html_url"],
-                      "description": repo.get("description", "")} for repo in repos if isinstance(repo, dict)]
-        return {
-            "found": True, "login": d.get("login"), "name": d.get("name"),
-            "bio": d.get("bio"), "followers": d.get("followers"), "following": d.get("following"),
-            "public_repos": d.get("public_repos"), "company": d.get("company"),
-            "location": d.get("location"), "blog": d.get("blog"),
-            "avatar_url": d.get("avatar_url"), "profile_url": d.get("html_url"),
-            "top_repos": top_repos
-        }
-    except Exception as e:
-        return {"found": False, "error": str(e)}
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 #  AUTH ENDPOINTS
 # ══════════════════════════════════════════════════════════════════════════════
@@ -4084,16 +4065,24 @@ async def auth_register(req: RegisterReq):
             r = httpx.post("https://api.resend.com/emails",
                 headers={"Authorization": f"Bearer {resend_key}", "Content-Type": "application/json"},
                 json={"from": "Comonk AI <onboarding@resend.dev>",
-                      "to": ["kunalpatel8702@gmail.com"],  # Resend free tier: owner email only
+                      "to": [req.email.lower().strip()],
                       "subject": f"Comonk AI — OTP for {req.name}",
                       "text": f"Hi {req.name},\n\nYour Comonk AI verification OTP is: {otp}\n\nValid for 10 minutes.\n\n— Comonk AI Team"},
                 timeout=10)
             email_sent = r.status_code == 200
         except Exception:
             pass
-    return {"success": True, "user_id": user_id, "otp_sent": email_sent,
-            "dev_otp": otp,  # Remove in production
-            "message": f"OTP sent to email. Check inbox."}
+    resp = {"success": True, "user_id": user_id, "otp_sent": email_sent}
+    if not email_sent:
+        # Resend's free tier only delivers to the account owner's own address
+        # until a sending domain is verified, so real signups currently can't
+        # receive this by email - fall back to returning it directly rather
+        # than locking every new user out. Once RESEND_API_KEY's domain is
+        # verified for arbitrary recipients, email_sent will be True and this
+        # branch (and the OTP exposure) stops happening automatically.
+        resp["dev_otp"] = otp
+    resp["message"] = "OTP sent to email. Check inbox." if email_sent else "Check your email for the OTP, or use the code shown here."
+    return resp
 
 @app.post("/api/auth/verify-otp")
 async def auth_verify_otp(req: OTPReq):
@@ -4404,7 +4393,7 @@ comonk.ai | 100% Free Career Intelligence"""
             r = httpx.post("https://api.resend.com/emails",
                 headers={"Authorization": f"Bearer {resend_key}", "Content-Type": "application/json"},
                 json={"from": "Comonk AI <onboarding@resend.dev>",
-                      "to": ["kunalpatel8702@gmail.com"],
+                      "to": [row["email"]],
                       "subject": f"✅ HR Contacts Approved — {row['name']}",
                       "text": email_body}, timeout=10)
             email_sent = r.status_code == 200
