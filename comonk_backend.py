@@ -457,7 +457,9 @@ async def rate_limit_middleware(request: Request, call_next):
             )
     return await call_next(request)
 
-_FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend")
+# frontend/ is the Next.js project source; the actual static export it builds
+# lands in frontend/out (see frontend/next.config.ts: output: "export").
+_FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend", "out")
 
 @app.get("/")
 def root():
@@ -4993,12 +4995,20 @@ def api_daily_briefing(request: Request):
     }
 
 
-# ── Catch-all: serve frontend static files (CSS, JS, images) ─────────────────
+# ── Catch-all: serve the Next.js static export ────────────────────────────────
+# next.config.ts sets trailingSlash: true, so a route like /app exports to
+# frontend/out/app/index.html, not frontend/out/app.html - a plain "does this
+# exact path exist as a file" check would miss that directory-style route
+# entirely and silently fall back to the landing page. Check, in order: the
+# exact file, then "<path>/index.html", then finally the root index.html.
 @app.get("/{file_path:path}")
 def serve_static(file_path: str):
     full = os.path.join(_FRONTEND_DIR, file_path)
     if os.path.isfile(full):
         return FileResponse(full)
+    dir_index = os.path.join(full, "index.html")
+    if os.path.isfile(dir_index):
+        return FileResponse(dir_index)
     idx = os.path.join(_FRONTEND_DIR, "index.html")
     if os.path.isfile(idx):
         return FileResponse(idx)
