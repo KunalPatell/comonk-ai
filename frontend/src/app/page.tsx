@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { AuthModal } from "@/components/AuthModal";
+import { PersonaAvatar } from "@/components/PersonaAvatar";
 import { RevealOnScroll } from "@/components/RevealOnScroll";
 import { AnimatedCounter } from "@/components/AnimatedCounter";
 import { GlowCard } from "@/components/GlowCard";
@@ -139,11 +140,19 @@ export default function LandingPage() {
           <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.6 }}
+            transition={{ duration: 0.7 }}
+            className="flex justify-center mb-2"
+          >
+            <PersonaAvatar size={190} primary="#8b5cf6" secondary="#c4b5fd" accessory="spark" name="Cora" role="Career Copilot" />
+          </motion.div>
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.6, delay: 0.1 }}
             className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full border border-white/10 bg-white/5 text-xs font-semibold text-[#a78bfa] mb-6"
           >
             <Sparkles className="h-3.5 w-3.5" />
-            100% Free Career Intelligence — No Catch
+            Meet Cora — 100% Free Career Intelligence, No Catch
           </motion.div>
           <motion.h1
             initial={{ opacity: 0, y: 24 }}
