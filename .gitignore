@@ -42,3 +42,9 @@ HR\ Mail\ List.xlsx
 scratch/
 out.txt
 new_num.txt
+
+# Local safety backups — kept on disk, not in git. The pre-React frontend is
+# already recoverable from history (see the Next.js rebuild commit), and the
+# database itself is untracked, so committing these would only add bloat.
+comonk.db.bak
+frontend-vanilla-backup/
