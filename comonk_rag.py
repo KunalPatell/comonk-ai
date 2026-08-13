@@ -131,4 +131,30 @@ def search_companies(query: str, n: int = 10, ai_only: bool = False) -> List[Dic
 
 
 def get_company_count() -> int:
-    return _get_collection().count()
+    """How many companies are indexed — WITHOUT building the index.
+
+    This used to call _get_collection(), which rebuilds the whole index whenever
+    the collection is empty, embedding every company through all-MiniLM-L6-v2.
+    Render's free tier has no persistent disk, so chroma_db is wiped on every
+    restart and that rebuild ran on the first request after every cold start.
+
+    /api/stats calls this. So a cheap dashboard number was paying for a full
+    re-index, and once the workbook grew from 2,008 to 3,377 companies the
+    rebuild pushed the 512MB container over and answered 502 — intermittently,
+    depending on whether a request happened to land on a cold container.
+
+    Reading the count needs no embedding function, so this opens the store
+    directly and reports 0 when nothing is indexed yet. Semantic search still
+    builds the index on demand through _get_collection(); triggering that is
+    simply not the stats endpoint's job.
+    """
+    if _collection is not None:
+        return _collection.count()
+    try:
+        client = chromadb.PersistentClient(path=CHROMA_DIR)
+        if not any(c.name == "comonk_companies_v2" for c in client.list_collections()):
+            return 0
+        return client.get_collection("comonk_companies_v2").count()
+    except Exception as e:
+        print(f"[RAG] count unavailable (index not built yet): {e}")
+        return 0
