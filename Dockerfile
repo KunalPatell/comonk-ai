@@ -9,7 +9,7 @@ COPY requirements_comonk.txt .
 RUN pip install --no-cache-dir -r requirements_comonk.txt
 
 COPY . .
-COPY backend/static/ ./static
+COPY backend/static/ ./static/
 
 EXPOSE 8000
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

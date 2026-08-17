@@ -438,6 +438,11 @@ compiled_graph = workflow.compile()
 
 @app.get("/")
 def read_root():
+    import os
+    from fastapi.responses import FileResponse
+    for p in ["static/index.html", "backend/static/index.html"]:
+        if os.path.exists(p):
+            return FileResponse(p)
     return {
         "status": "ok",
         "version": "3.0.0",
@@ -1863,3 +1868,11 @@ async def get_cheat_sheet_topics():
         "total_topics": 26,
         "cost": "FREE - AI generates fresh cheat sheet for any topic instantly"
     }
+
+# Static files mount
+import os
+from fastapi.staticfiles import StaticFiles
+for s_dir in ["static", "backend/static"]:
+    if os.path.exists(s_dir):
+        app.mount("/static", StaticFiles(directory=s_dir), name="static")
+        break
