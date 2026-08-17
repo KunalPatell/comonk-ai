@@ -754,6 +754,38 @@ Generated: ' + new Date().toISOString() + '
   }
 
   // 10c. GSAP Spring Physics & Staggered Scroll Triggers
+  
+  // Mobile Hamburger Menu Handler
+  const hamburger = document.getElementById('hamburger');
+  const navLinks = document.getElementById('navLinks');
+  if (hamburger && navLinks) {
+    hamburger.addEventListener('click', (e) => {
+      e.stopPropagation();
+      navLinks.classList.toggle('open');
+      const icon = hamburger.querySelector('i');
+      if (icon) {
+        if (navLinks.classList.contains('open')) {
+          icon.classList.remove('fa-bars');
+          icon.classList.add('fa-xmark');
+        } else {
+          icon.classList.remove('fa-xmark');
+          icon.classList.add('fa-bars');
+        }
+      }
+    });
+
+    document.addEventListener('click', (e) => {
+      if (navLinks.classList.contains('open') && !navLinks.contains(e.target) && e.target !== hamburger) {
+        navLinks.classList.remove('open');
+        const icon = hamburger.querySelector('i');
+        if (icon) {
+          icon.classList.remove('fa-xmark');
+          icon.classList.add('fa-bars');
+        }
+      }
+    });
+  }
+
   window.addEventListener('DOMContentLoaded', () => {
     if (typeof gsap !== 'undefined') {
       gsap.from('.hero-badge, .hero-title, .hero-sub, .hero-cta-group, .hero-stats', {
