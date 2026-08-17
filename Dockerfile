@@ -1,16 +1,15 @@
-#  Fast & Lightweight Runtime Serving FastAPI + World-Class Static UI 
-FROM python:3.12-slim AS runtime
-RUN useradd -m -u 1000 user
-ENV HOME=/home/user PATH=/home/user/.local/bin:$PATH PYTHONUNBUFFERED=1
-WORKDIR $HOME/app
+#  Fast & Lightweight Comonk AI Runtime 
+FROM python:3.11-slim
 
-COPY --chown=user backend/requirements.txt ./requirements.txt
-RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir -r requirements.txt
+WORKDIR /app
 
-COPY --chown=user backend/ ./
-COPY --chown=user backend/static/ ./static
+RUN apt-get update && apt-get install -y --no-install-recommends     build-essential gcc libgomp1     && rm -rf /var/lib/apt/lists/*
 
-RUN chown -R user:user $HOME/app
-USER user
+COPY requirements_comonk.txt .
+RUN pip install --no-cache-dir -r requirements_comonk.txt
+
+COPY . .
+COPY backend/static/ ./static
+
 EXPOSE 8000
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
