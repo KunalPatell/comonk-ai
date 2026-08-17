@@ -1,35 +1,16 @@
-# ── Stage 1: build the Next.js frontend (static export) ──
-FROM node:20-alpine AS frontend-build
-WORKDIR /app/frontend
-COPY frontend/package.json frontend/package-lock.json* ./
-RUN npm install --legacy-peer-deps
-COPY frontend/ ./
-RUN npm run build
+#  Fast & Lightweight Runtime Serving FastAPI + World-Class Static UI 
+FROM python:3.12-slim AS runtime
+RUN useradd -m -u 1000 user
+ENV HOME=/home/user PATH=/home/user/.local/bin:$PATH PYTHONUNBUFFERED=1
+WORKDIR $HOME/app
 
-# ── Stage 2: Python runtime ──
-FROM python:3.11-slim
+COPY --chown=user backend/requirements.txt ./requirements.txt
+RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir -r requirements.txt
 
-WORKDIR /app
+COPY --chown=user backend/ ./
+COPY --chown=user backend/static/ ./static
 
-# Build deps for chromadb (onnxruntime) + pdfplumber
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential gcc libgomp1 \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install Python deps first (layer cache)
-COPY requirements_comonk.txt .
-RUN pip install --no-cache-dir -r requirements_comonk.txt
-
-# App code
-COPY *.py ./
-COPY Ahmedabad_IT_AIML_FINAL_MASTER.xlsx .
-
-# Only the built static export is needed at runtime - comonk_backend.py's
-# _FRONTEND_DIR points at frontend/out (see that file for why).
-COPY --from=frontend-build /app/frontend/out ./frontend/out
-
-# HF Spaces requires 7860
-ENV PORT=7860
-EXPOSE 7860
-
-CMD ["python", "comonk_backend.py"]
+RUN chown -R user:user $HOME/app
+USER user
+EXPOSE 8000
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
